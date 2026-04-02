@@ -1,0 +1,75 @@
+import re
+from typing import List, Dict, Any
+
+
+class DLTParser:
+    """
+    Simple DLT text parser.
+
+    Expected log format (flexible):
+    [timestamp] ECU APP CONTEXT LEVEL payload
+
+    Example:
+    12:00:01.123 CCU2 SOMEIP SD INFO FindService sent
+    12:00:03.456 CCU2 SOMEIP SD ERROR Timeout waiting for OfferService
+    """
+
+    def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
+        rows = []
+
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(f, start=1):
+                parsed = self._parse_line(line.strip(), idx)
+                if parsed:
+                    rows.append(parsed)
+
+        return rows
+
+    def _parse_line(self, line: str, line_no: int) -> Dict[str, Any]:
+        if not line:
+            return None
+
+        # Flexible split
+        parts = line.split()
+
+        # Minimum expected tokens
+        if len(parts) < 5:
+            return {
+                "line_no": line_no,
+                "timestamp": "",
+                "ecu": "",
+                "app": "",
+                "context": "",
+                "level": "",
+                "payload": line
+            }
+
+        timestamp = parts[0]
+        ecu = parts[1]
+        app = parts[2]
+        context = parts[3]
+        level = parts[4]
+
+        payload = " ".join(parts[5:]) if len(parts) > 5 else ""
+
+        return {
+            "line_no": line_no,
+            "timestamp": timestamp,
+            "ecu": ecu,
+            "app": app,
+            "context": context,
+            "level": level,
+            "payload": payload
+        }
+
+
+if __name__ == "__main__":
+    parser = DLTParser()
+
+    # Replace with your file
+    sample_file = "sample_log.txt"
+
+    result = parser.parse_file(sample_file)
+
+    from pprint import pprint
+    pprint(result[:5])
