@@ -1,0 +1,258 @@
+"""
+feature_extractor.py
+
+Feature extraction for CCU2 Gateway / Telematics DLT logs.
+Pure Python 3.12, no external dependencies.
+"""
+
+from typing import List, Dict, Any
+
+
+class FeatureExtractor:
+    def extract(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Containers (order preserved, deduplicated manually)
+        key_events = []
+        error_events = []
+        warning_events = []
+        keywords = []
+        evidence_refs = []
+
+        # Event flags
+        event_flags = {
+ False,
+            "offer_service_seen": False,
+            "subscribe_eventgroup_seen": False,
+            "subscribe_ack_seen": False,
+            "timeout_seen": False,
+            "lte_registered": False,
+            "data_sent": False,
+        }
+
+        normalized_rows = []
+
+        # Normalize and preprocess
+        for row in rows:
+            norm_payload = self._normalize_text(row.get("payload"))
+            norm_app = self._normalize_text(row.get("app"))
+            norm_ctx = self._normalize_text(row.get("context"))
+
+            normalized_rows.append({
+                "row": row,
+                "payload_norm": norm_payload,
+                "app_norm": norm_app,
+                "context_norm": norm_ctx,
+            })
+
+        # Main scan
+        for item in normalized_rows:
+            row = item["row"]
+            payload_norm = item["payload_norm"]
+            level = (row.get("level") or "").upper()
+
+            # Keywords
+            self._extract_keywords(item, keywords)
+
+            # Events
+            self._extract_events(
+                item,
+                key_events,
+                event_flags,
+                evidence_refs,
+            )
+
+            # Errors
+            if level in ("ERROR", "FAIL") or any(
+                k in payload_norm
+                for k in ("timeout", "failed", "error", "rejected", "unavailable", "drop")
+            ):
+                self._add_unique(error_events, row.get("payload"))
+
+            # Warnings
+            if level == "WARN" or "warning" in payload_norm:
+                self._add_unique(warning_events, row.get("payload"))
+
+        # Missing events
+        missing_expected_events = self._detect_missing_events(event_flags)
+
+        # Sequence observations
+        sequence_observations = self._build_sequence_observations(event_flags)
+
+        # Domain detection
+        candidate_domain = self._detect_domain(keywords)
+
+        return {
+            "key_events": key_events,
+            "error_events": error_events,
+            "warning_events": warning_events,
+            "keywords": keywords,
+            "missing_expected_events": missing_expected_events,
+            "sequence_observations": sequence_observations,
+            "candidate_domain": candidate_domain,
+            "event_flags": event_flags,
+            "evidence_refs": evidence_refs,
+        }
+
+    # -------------------- Helpers --------------------
+
+    def _normalize_text(self, text: Any) -> str:
+        if not text:
+            return ""
+        return str(text).replace("\x00", "").lower().strip()
+
+    def _add_unique(self, container: list, value: Any):
+        if value and value not in container:
+            container.append(value)
+
+    def _extract_keywords(self, item: Dict, keywords: list):
+        sources = f"{item['payload_norm']} {item['app_norm']} {item['context_norm']}"
+
+        keyword_map = [
+            # Gateway
+            "gateway", "forward", "routing", "dropped", "received", "send", "publish",
+            # Telematics / LTE
+            "modem", "sim", "apn", "attach", "detach", "registration", "bearer",
+            "lte", "network", "signal", "backend", "data session",
+            # SOME/IP
+            "someip", "findservice", "offerservice",
+            "subscribeeventgroup", "subscribeack",
+            # Diagnostics
+            "uds", "nrc", "diagnostic session", "security access",
+            # DoIP
+            "doip",
+            # Boot
+            "boot", "startup", "init", "ready",
+        ]
+
+        for kw in keyword_map:
+            if kw in sources:
+                self._add_unique(keywords, kw)
+
+    def _extract_events(
+        self,
+        item: Dict,
+        key_events: list,
+        event_flags: dict,
+        evidence_refs: list,
+    ):
+        p = item["payload_norm"]
+        row = item["row"]
+
+        def record(event_name: str, flag: str | None = None):
+            self._add_unique(key_events, event_name)
+            if flag:
+                event_flags[flag] = True
+            self._collect_evidence(row, evidence_refs)
+
+        if "findservice" in p:
+            record("FindService", "find_service_seen")
+
+        if "offerservice" in p:
+            record("OfferService", "offer_service_seen")
+
+        if "subscribeeventgroup" in p:
+            record("SubscribeEventgroup", "subscribe_eventgroup_seen")
+
+        if "subscribeack" in p:
+            record("SubscribeAck", "subscribe_ack_seen")
+
+        if "timeout" in p:
+            record("Timeout", "timeout_seen")
+
+        if any(k in p for k in ("attach", "registration")):
+            record("LTE Registration", "lte_registered")
+
+        if any(k in p for k in ("send", "forward", "publish")):
+            record("Data Send / Forward", "data_sent")
+
+    def _detect_missing_events(self, flags: dict) -> list:
+        missing = []
+
+        if flags["find_service_seen"] and not flags["offer_service_seen"]:
+            missing.append("OfferService missing after FindService")
+
+        if flags["subscribe_eventgroup_seen"] and not flags["subscribe_ack_seen"]:
+            missing.append("SubscribeAck missing after SubscribeEventgroup")
+
+        if flags["data_sent"] and not flags["lte_registered"]:
+            missing.append("LTE registration missing before data send")
+
+        return missing
+
+    def _build_sequence_observations(self, flags: dict) -> list:
+        observations = []
+
+        if flags["find_service_seen"] and not flags["offer_service_seen"]:
+            observations.append("Client request without provider response")
+
+        if flags["data_sent"] and not flags["lte_registered"]:
+            observations.append("LTE not ready before send attempt")
+
+        return observations
+
+    def _collect_evidence(self, row: Dict, evidence_refs: list):
+        ref = {
+            "line_no": row.get("line_no"),
+            "timestamp": row.get("timestamp"),
+            "payload": row.get("payload"),
+        }
+        if ref not in evidence_refs:
+            evidence_refs.append(ref)
+
+    def _detect_domain(self, keywords: list) -> str:
+        domain_map = {
+            "SOME/IP": {"someip", "findservice", "offerservice"},
+            "LTE": {"lte", "attach", "registration", "network", "signal"},
+            "TELEMATICS": {"modem", "sim", "apn", "backend"},
+            "UDS": {"uds", "nrc", "diagnostic session"},
+            "DoIP": {"doip"},
+            "BOOT": {"boot", "startup", "init"},
+            "GATEWAY": {"gateway", "routing", "forward"},
+        }
+
+        kw_set = set(keywords)
+
+        for domain, trigger in domain_map.items():
+            if kw_set & trigger:
+                return domain
+
+        return "GENERIC"
+
+
+# -------------------- Example Test --------------------
+
+if __name__ == "__main__":
+    sample_rows = [
+        {
+            "line_no": 1,
+            "timestamp": "2026-04-02 10:00:01",
+            "ecu": "CCU2",
+            "app": "SOMEIP",
+            "context": "Client",
+            "level": "INFO",
+            "payload": "FindService request sent",
+        },
+        {
+            "line_no": 2,
+            "timestamp": "2026-04-02 10:00:03",
+            "ecu": "CCU2",
+            "app": "LTE",
+            "context": "Modem",
+            "level": "WARN",
+            "payload": "Data send attempted before LTE registration",
+        },
+        {
+            "line_no": 3,
+            "timestamp": "2026-04-02 10:00:05",
+            "ecu": "CCU2",
+            "app": "Gateway",
+            "context": "Routing",
+            "level": "ERROR",
+            "payload": "Packet dropped due to timeout",
+        },
+    ]
+
+    extractor = FeatureExtractor()
+    result = extractor.extract(sample_rows)
+
+    from pprint import pprint
+    pprint(result)
