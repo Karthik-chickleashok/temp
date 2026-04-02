@@ -1,56 +1,75 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import json
-
-from feature_extractor.feature_extractor import FeatureExtractor
+import re
+from typing import List, Dict, Any
 
 
-def load_file():
-    path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-    if not path:
-        return
+class DLTParser:
+    """
+    Simple DLT text parser.
 
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
+    Expected log format (flexible):
+    [timestamp] ECU APP CONTEXT LEVEL payload
 
-        extractor = FeatureExtractor()
-        result = extractor.extract(data)
+    Example:
+    12:00:01.123 CCU2 SOMEIP SD INFO FindService sent
+    12:00:03.456 CCU2 SOMEIP SD ERROR Timeout waiting for OfferService
+    """
 
-        output_text.delete(1.0, tk.END)
-        output_text.insert(tk.END, json.dumps(result, indent=2))
+    def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
+        rows = []
 
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            for idx, line in enumerate(f, start=1):
+                parsed = self._parse_line(line.strip(), idx)
+                if parsed:
+                    rows.append(parsed)
+
+        return rows
+
+    def _parse_line(self, line: str, line_no: int) -> Dict[str, Any]:
+        if not line:
+            return None
+
+        # Flexible split
+        parts = line.split()
+
+        # Minimum expected tokens
+        if len(parts) < 5:
+            return {
+                "line_no": line_no,
+                "timestamp": "",
+                "ecu": "",
+                "app": "",
+                "context": "",
+                "level": "",
+                "payload": line
+            }
+
+        timestamp = parts[0]
+        ecu = parts[1]
+        app = parts[2]
+        context = parts[3]
+        level = parts[4]
+
+        payload = " ".join(parts[5:]) if len(parts) > 5 else ""
+
+        return {
+            "line_no": line_no,
+            "timestamp": timestamp,
+            "ecu": ecu,
+            "app": app,
+            "context": context,
+            "level": level,
+            "payload": payload
+        }
 
 
-def save_report():
-    content = output_text.get(1.0, tk.END)
+if __name__ == "__main__":
+    parser = DLTParser()
 
-    path = filedialog.asksaveasfilename(defaultextension=".json")
-    if not path:
-        return
+    # Replace with your file
+    sample_file = "sample_log.txt"
 
-    with open(path, "w") as f:
-        f.write(content)
+    result = parser.parse_file(sample_file)
 
-    messagebox.showinfo("Saved", "Report saved successfully")
-
-
-root = tk.Tk()
-root.title("CCU2 Log Analyzer")
-root.geometry("900x600")
-
-frame = tk.Frame(root)
-frame.pack(pady=10)
-
-btn_load = tk.Button(frame, text="Load Parsed Log (JSON)", command=load_file)
-btn_load.pack(side=tk.LEFT, padx=5)
-
-btn_save = tk.Button(frame, text="Save Report", command=save_report)
-btn_save.pack(side=tk.LEFT, padx=5)
-
-output_text = tk.Text(root, wrap=tk.WORD)
-output_text.pack(fill=tk.BOTH, expand=True)
-
-root.mainloop()
+    from pprint import pprint
+    pprint(result[:5])
