@@ -15,7 +15,7 @@ class CCU2AnalyzerUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("CCU2 Diagnosis Tool")
-        self.root.geometry("1250x780")
+        self.root.geometry("1280x820")
 
         self.controller = DLTController()
 
@@ -26,7 +26,9 @@ class CCU2AnalyzerUI:
         self.raw_messages: list[tuple[str, list]] = []
         self.normalized_rows: list[dict] = []
         self.feature_output: dict | None = None
-        self.requirement_output: list[dict] | None = None
+        self.requirement_output: dict | None = None
+
+        self.query_var = tk.StringVar()
 
         self._build_ui()
 
@@ -46,9 +48,38 @@ class CCU2AnalyzerUI:
         browse_frame = tk.Frame(top)
         browse_frame.pack(side=tk.RIGHT)
 
-        tk.Button(browse_frame, text="Browse File", width=12, command=self.browse_single_file).pack(side=tk.LEFT, padx=4)
-        tk.Button(browse_frame, text="Browse Files", width=12, command=self.browse_multiple_files).pack(side=tk.LEFT, padx=4)
-        tk.Button(browse_frame, text="Browse Folder", width=12, command=self.browse_folder).pack(side=tk.LEFT, padx=4)
+        tk.Button(
+            browse_frame,
+            text="Browse File",
+            width=12,
+            command=self.browse_single_file,
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            browse_frame,
+            text="Browse Files",
+            width=12,
+            command=self.browse_multiple_files,
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Button(
+            browse_frame,
+            text="Browse Folder",
+            width=12,
+            command=self.browse_folder,
+        ).pack(side=tk.LEFT, padx=4)
+
+        query_frame = tk.Frame(self.root)
+        query_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(query_frame, text="Scope / Query:").pack(side=tk.LEFT)
+
+        self.query_entry = tk.Entry(
+            query_frame,
+            textvariable=self.query_var,
+            width=80,
+        )
+        self.query_entry.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
 
         controls = tk.Frame(self.root)
         controls.pack(fill=tk.X, padx=10, pady=5)
@@ -107,6 +138,15 @@ class CCU2AnalyzerUI:
         )
         self.btn_save_requirements.pack(side=tk.LEFT, padx=5)
 
+        self.btn_search = tk.Button(
+            controls,
+            text="Search / Diagnose",
+            width=16,
+            state=tk.DISABLED,
+            command=self.run_search_analysis,
+        )
+        self.btn_search.pack(side=tk.LEFT, padx=5)
+
         self.btn_clear = tk.Button(
             controls,
             text="Clear",
@@ -161,8 +201,13 @@ class CCU2AnalyzerUI:
         extra = ""
         if len(self.selected_files) > 20:
             extra = f"\n... and {len(self.selected_files) - 20} more file(s)"
-        self.selection_label.config(text=f"Multiple files selected: {len(self.selected_files)}")
-        self._set_output_text(f"Selected multiple files ({len(self.selected_files)}):\n{summary}{extra}\n")
+
+        self.selection_label.config(
+            text=f"Multiple files selected: {len(self.selected_files)}"
+        )
+        self._set_output_text(
+            f"Selected multiple files ({len(self.selected_files)}):\n{summary}{extra}\n"
+        )
 
     def browse_folder(self) -> None:
         folder = filedialog.askdirectory(title="Select folder")
@@ -183,7 +228,10 @@ class CCU2AnalyzerUI:
 
     def parse_selection(self) -> None:
         if not self.input_mode:
-            messagebox.showwarning("No input", "Please select a file, files, or folder first.")
+            messagebox.showwarning(
+                "No input",
+                "Please select a file, files, or folder first.",
+            )
             return
 
         try:
@@ -201,10 +249,16 @@ class CCU2AnalyzerUI:
                     grouped_messages.append((file_path.name, msgs))
 
             elif self.input_mode == "folder":
-                files = self.controller.collect_supported_files_from_folder(self.selected_folder)
+                files = self.controller.collect_supported_files_from_folder(
+                    self.selected_folder
+                )
                 if not files:
-                    messagebox.showwarning("No files", "No supported .dlt/.gz files found in selected folder.")
+                    messagebox.showwarning(
+                        "No files",
+                        "No supported .dlt/.gz files found in selected folder.",
+                    )
                     return
+
                 for file_path in files:
                     msgs = self.controller.parse_file(file_path)
                     grouped_messages.append((file_path.name, msgs))
@@ -213,7 +267,9 @@ class CCU2AnalyzerUI:
                 raise ValueError(f"Unsupported input mode: {self.input_mode}")
 
             self.raw_messages = grouped_messages
-            self.normalized_rows = DLTNormalizer.normalize_grouped_messages(grouped_messages)
+            self.normalized_rows = DLTNormalizer.normalize_grouped_messages(
+                grouped_messages
+            )
             self.feature_output = None
             self.requirement_output = None
 
@@ -244,6 +300,7 @@ class CCU2AnalyzerUI:
             self.btn_save_features.config(state=tk.DISABLED)
             self.btn_evaluate_requirements.config(state=tk.DISABLED)
             self.btn_save_requirements.config(state=tk.DISABLED)
+            self.btn_search.config(state=tk.DISABLED)
 
         except Exception as e:
             messagebox.showerror("Parse Error", str(e))
@@ -254,7 +311,10 @@ class CCU2AnalyzerUI:
 
     def extract_features(self) -> None:
         if not self.normalized_rows:
-            messagebox.showwarning("No normalized data", "Please parse and normalize input first.")
+            messagebox.showwarning(
+                "No normalized data",
+                "Please parse and normalize input first.",
+            )
             return
 
         try:
@@ -262,11 +322,14 @@ class CCU2AnalyzerUI:
             self.feature_output = extractor.extract(self.normalized_rows)
             self.requirement_output = None
 
-            self._set_output_text(json.dumps(self.feature_output, indent=2, ensure_ascii=False))
+            self._set_output_text(
+                json.dumps(self.feature_output, indent=2, ensure_ascii=False)
+            )
 
             self.btn_save_features.config(state=tk.NORMAL)
             self.btn_evaluate_requirements.config(state=tk.NORMAL)
             self.btn_save_requirements.config(state=tk.DISABLED)
+            self.btn_search.config(state=tk.DISABLED)
 
         except Exception as e:
             messagebox.showerror("Feature Extraction Error", str(e))
@@ -277,27 +340,174 @@ class CCU2AnalyzerUI:
 
     def evaluate_requirements(self) -> None:
         if not self.normalized_rows:
-            messagebox.showwarning("No normalized data", "Please parse and normalize input first.")
+            messagebox.showwarning(
+                "No normalized data",
+                "Please parse and normalize input first.",
+            )
             return
 
         if not self.feature_output:
-            messagebox.showwarning("No features", "Please extract features first.")
+            messagebox.showwarning(
+                "No features",
+                "Please extract features first.",
+            )
             return
 
         try:
             evaluator = RequirementEvaluator()
-            self.requirement_output = evaluator.evaluate(self.normalized_rows, self.feature_output)
+            self.requirement_output = evaluator.evaluate(
+                self.normalized_rows,
+                self.feature_output,
+            )
 
             display_data = {
                 "requirement_features": self.requirement_output,
-                "feature_count": len(self.requirement_output),
+                "feature_count": len(self.requirement_output.get("results", []))
+                if isinstance(self.requirement_output, dict)
+                else 0,
             }
 
-            self._set_output_text(json.dumps(display_data, indent=2, ensure_ascii=False))
+            self._set_output_text(
+                json.dumps(display_data, indent=2, ensure_ascii=False)
+            )
             self.btn_save_requirements.config(state=tk.NORMAL)
+            self.btn_search.config(state=tk.NORMAL)
 
         except Exception as e:
             messagebox.showerror("Requirement Evaluation Error", str(e))
+
+    # ------------------------------------------------------------------
+    # Search / Diagnose
+    # ------------------------------------------------------------------
+
+    def run_search_analysis(self) -> None:
+        query = self.query_var.get().strip().lower()
+
+        if not query:
+            messagebox.showwarning(
+                "No query",
+                "Please enter a scope or question.",
+            )
+            return
+
+        if not self.requirement_output:
+            messagebox.showwarning(
+                "No requirement results",
+                "Please evaluate requirements first.",
+            )
+            return
+
+        try:
+            result = self.search_reasoner(query)
+            self._set_output_text(json.dumps(result, indent=2, ensure_ascii=False))
+
+        except Exception as e:
+            messagebox.showerror("Search / Diagnose Error", str(e))
+
+    def search_reasoner(self, query: str) -> dict:
+        categories = self._map_query_to_categories(query)
+
+        results = self.requirement_output.get("results", []) if isinstance(
+            self.requirement_output, dict
+        ) else []
+
+        if categories:
+            filtered = [
+                r for r in results
+                if str(r.get("category", "")).upper() in categories
+            ]
+        else:
+            filtered = results
+
+        failed = [r for r in filtered if r.get("status") == "FAIL"]
+        passed = [r for r in filtered if r.get("status") == "PASS"]
+        not_applicable = [r for r in filtered if r.get("status") == "NOT_APPLICABLE"]
+
+        conclusion = self._build_search_conclusion(
+            query=query,
+            categories=categories,
+            failed=failed,
+            passed=passed,
+            not_applicable=not_applicable,
+        )
+
+        return {
+            "query": query,
+            "selected_categories": categories if categories else ["ALL"],
+            "summary": {
+                "total_matching_requirements": len(filtered),
+                "failed": len(failed),
+                "passed": len(passed),
+                "not_applicable": len(not_applicable),
+            },
+            "failed_results": failed[:20],
+            "passed_results": passed[:20],
+            "conclusion": conclusion,
+        }
+
+    def _map_query_to_categories(self, query: str) -> list[str]:
+        q = query.lower()
+        categories: list[str] = []
+
+        mapping = {
+            "APN": ["apn"],
+            "NETWORK": ["network", "internet", "ip", "connectivity"],
+            "GATEWAY": ["gateway", "forward", "routing", "route"],
+            "CONTROL": ["someip", "some/ip", "request", "response", "control"],
+            "SIM": ["sim", "imsi", "iccid", "eid"],
+            "GENERAL": ["timeout", "error", "warn", "general"],
+        }
+
+        for category, tokens in mapping.items():
+            if any(token in q for token in tokens):
+                categories.append(category)
+
+        deduped: list[str] = []
+        for category in categories:
+            if category not in deduped:
+                deduped.append(category)
+
+        return deduped
+
+    def _build_search_conclusion(
+        self,
+        query: str,
+        categories: list[str],
+        failed: list[dict],
+        passed: list[dict],
+        not_applicable: list[dict],
+    ) -> str:
+        if not categories:
+            if failed:
+                return (
+                    f"Query '{query}' did not map to a specific category, but "
+                    f"{len(failed)} failed requirement(s) were found in the full result set."
+                )
+            return (
+                f"Query '{query}' did not map to a specific category and no clear failures "
+                f"were found in the current evaluated results."
+            )
+
+        if failed:
+            failed_names = ", ".join(
+                str(item.get("feature_name", "")) for item in failed[:5]
+            )
+            return (
+                f"For query '{query}', category filter {categories} found "
+                f"{len(failed)} failed requirement(s). "
+                f"Top failed checks: {failed_names}."
+            )
+
+        if passed:
+            return (
+                f"For query '{query}', category filter {categories} found no failures. "
+                f"{len(passed)} requirement(s) passed."
+            )
+
+        return (
+            f"For query '{query}', category filter {categories} found only "
+            f"NOT_APPLICABLE results or no matching requirement evaluations."
+        )
 
     # ------------------------------------------------------------------
     # Save actions
@@ -305,7 +515,10 @@ class CCU2AnalyzerUI:
 
     def save_normalized_json(self) -> None:
         if not self.normalized_rows:
-            messagebox.showwarning("No parsed data", "Please parse input first.")
+            messagebox.showwarning(
+                "No parsed data",
+                "Please parse input first.",
+            )
             return
 
         path = filedialog.asksaveasfilename(
@@ -320,14 +533,20 @@ class CCU2AnalyzerUI:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.normalized_rows, f, indent=2, ensure_ascii=False)
 
-            messagebox.showinfo("Saved", f"Normalized JSON saved successfully:\n{path}")
+            messagebox.showinfo(
+                "Saved",
+                f"Normalized JSON saved successfully:\n{path}",
+            )
 
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
     def save_features_json(self) -> None:
         if not self.feature_output:
-            messagebox.showwarning("No features", "Please extract features first.")
+            messagebox.showwarning(
+                "No features",
+                "Please extract features first.",
+            )
             return
 
         path = filedialog.asksaveasfilename(
@@ -342,14 +561,20 @@ class CCU2AnalyzerUI:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.feature_output, f, indent=2, ensure_ascii=False)
 
-            messagebox.showinfo("Saved", f"Features JSON saved successfully:\n{path}")
+            messagebox.showinfo(
+                "Saved",
+                f"Features JSON saved successfully:\n{path}",
+            )
 
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
     def save_requirement_json(self) -> None:
         if self.requirement_output is None:
-            messagebox.showwarning("No requirement results", "Please evaluate requirements first.")
+            messagebox.showwarning(
+                "No requirement results",
+                "Please evaluate requirements first.",
+            )
             return
 
         path = filedialog.asksaveasfilename(
@@ -361,61 +586,17 @@ class CCU2AnalyzerUI:
             return
 
         try:
-            data = {
-                "requirement_features": self.requirement_output,
-                "feature_count": len(self.requirement_output),
-            }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                json.dump(self.requirement_output, f, indent=2, ensure_ascii=False)
 
-            messagebox.showinfo("Saved", f"Requirement JSON saved successfully:\n{path}")
+            messagebox.showinfo(
+                "Saved",
+                f"Requirement JSON saved successfully:\n{path}",
+            )
 
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
     # ------------------------------------------------------------------
     # Helpers
-    # ------------------------------------------------------------------
-
-    def clear_output(self) -> None:
-        self.input_mode = None
-        self.selected_files = []
-        self.selected_folder = None
-        self.raw_messages = []
-        self.normalized_rows = []
-        self.feature_output = None
-        self.requirement_output = None
-
-        self.selection_label.config(text="No input selected")
-
-        self.btn_parse.config(state=tk.DISABLED)
-        self.btn_save_normalized.config(state=tk.DISABLED)
-        self.btn_extract_features.config(state=tk.DISABLED)
-        self.btn_save_features.config(state=tk.DISABLED)
-        self.btn_evaluate_requirements.config(state=tk.DISABLED)
-        self.btn_save_requirements.config(state=tk.DISABLED)
-
-        self._set_output_text("")
-
-    def _reset_after_selection(self) -> None:
-        self.raw_messages = []
-        self.normalized_rows = []
-        self.feature_output = None
-        self.requirement_output = None
-
-        self.btn_parse.config(state=tk.NORMAL)
-        self.btn_save_normalized.config(state=tk.DISABLED)
-        self.btn_extract_features.config(state=tk.DISABLED)
-        self.btn_save_features.config(state=tk.DISABLED)
-        self.btn_evaluate_requirements.config(state=tk.DISABLED)
-        self.btn_save_requirements.config(state=tk.DISABLED)
-
-    def _set_output_text(self, text: str) -> None:
-        self.output_text.delete("1.0", tk.END)
-        self.output_text.insert(tk.END, text)
-
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = CCU2AnalyzerUI(root)
-    root.mainloop()
+    # ---------------------------------------------------------
