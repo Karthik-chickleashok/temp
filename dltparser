@@ -1,13 +1,14 @@
-import re
-from typing import List, Dict, Any
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 
 class DLTParser:
     """
-    Simple DLT text parser.
+    Simple text-based DLT parser.
 
-    Expected log format (flexible):
-    [timestamp] ECU APP CONTEXT LEVEL payload
+    Expected flexible format per line:
+    timestamp ECU APP CONTEXT LEVEL payload...
 
     Example:
     12:00:01.123 CCU2 SOMEIP SD INFO FindService sent
@@ -15,24 +16,22 @@ class DLTParser:
     """
 
     def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
-        rows = []
+        rows: List[Dict[str, Any]] = []
 
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             for idx, line in enumerate(f, start=1):
-                parsed = self._parse_line(line.strip(), idx)
-                if parsed:
+                parsed = self._parse_line(line.rstrip("\n"), idx)
+                if parsed is not None:
                     rows.append(parsed)
 
         return rows
 
-    def _parse_line(self, line: str, line_no: int) -> Dict[str, Any]:
-        if not line:
+    def _parse_line(self, line: str, line_no: int) -> Optional[Dict[str, Any]]:
+        if not line or not line.strip():
             return None
 
-        # Flexible split
         parts = line.split()
 
-        # Minimum expected tokens
         if len(parts) < 5:
             return {
                 "line_no": line_no,
@@ -41,7 +40,7 @@ class DLTParser:
                 "app": "",
                 "context": "",
                 "level": "",
-                "payload": line
+                "payload": line.strip(),
             }
 
         timestamp = parts[0]
@@ -49,7 +48,6 @@ class DLTParser:
         app = parts[2]
         context = parts[3]
         level = parts[4]
-
         payload = " ".join(parts[5:]) if len(parts) > 5 else ""
 
         return {
@@ -59,17 +57,5 @@ class DLTParser:
             "app": app,
             "context": context,
             "level": level,
-            "payload": payload
+            "payload": payload,
         }
-
-
-if __name__ == "__main__":
-    parser = DLTParser()
-
-    # Replace with your file
-    sample_file = "sample_log.txt"
-
-    result = parser.parse_file(sample_file)
-
-    from pprint import pprint
-    pprint(result[:5])
