@@ -1,48 +1,18 @@
-#!/usr/bin/env python3
-"""
-dlt_parser.py
-
-Single-file DLT parser that merges the roles of:
-- models.py        -> DLTMessage
-- parser.py        -> DLTParser
-- controller.py    -> DLTController
-- cli.py           -> CLI + text formatting
-- __main__.py      -> direct execution support
-- __init__.py      -> public exports
-
-Usage examples:
-    python dlt_parser.py parse MSM_RefLOgs.dlt
-    python dlt_parser.py parse MSM_RefLOgs.dlt -o parsed.json --format json
-    python dlt_parser.py parse data_folder --format csv -o parsed.csv
-
-Programmatic usage:
-    from dlt_parser import DLTParser, DLTController, DLTMessage
-    msgs = DLTParser.parse_file("MSM_RefLOgs.dlt")
-"""
-
 from __future__ import annotations
 
-import argparse
-import csv
 import datetime
 import gzip
 import hashlib
 import json
-import os
 import struct
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import List, Optional, Sequence
 
-
-# ============================================================================
-# Model
-# ============================================================================
 
 @dataclass
 class DLTMessage:
-    """Represents a single DLT (Diagnostic Log and Trace) message."""
+    """Represents one parsed DLT message."""
     index: int
     time: str
     timestamp: float
@@ -64,10 +34,6 @@ class DLTMessage:
     def from_dict(cls, data: dict) -> "DLTMessage":
         return cls(**data)
 
-
-# ============================================================================
-# Parser
-# ============================================================================
 
 CONTROL_SERVICES = {
     0x01: "set_log_level",
@@ -92,36 +58,31 @@ CONTROL_STATUS = {
 
 class DLTParser:
     """
-    Single-file, high-precision binary DLT parser.
-
-    Notes:
-    - Reads raw .dlt or gzip-compressed .dlt streams.
-    - Produces one DLTMessage per physical DLT message.
-    - Preserves the shared-file schema/order.
+    Binary DLT parser for .dlt and gzip-compressed .gz files.
     """
 
     CACHE_DIR = Path(".dlt_cache")
-    VERSION = "1.6.4-singlefile"
+    VERSION = "1.0.0-ui"
 
     @staticmethod
     def clean_verbose(data: bytes) -> str:
-        """Remove non-printables but preserve ANSI ESC (27)."""
-        res: List[str] = []
+        """Remove non-printables but preserve ANSI ESC."""
+        chars: List[str] = []
         for b in data:
             if 32 <= b <= 126 or b == 27:
-                res.append(chr(b))
-        return "".join(res).strip()
+                chars.append(chr(b))
+        return "".join(chars).strip()
 
     @staticmethod
     def clean_raw(data: bytes) -> str:
-        """Replace non-printables with '-' for non-verbose/raw logs."""
-        res: List[str] = []
+        """Replace non-printables with '-' in raw/non-verbose payloads."""
+        chars: List[str] = []
         for b in data:
             if 32 <= b <= 126:
-                res.append(chr(b))
+                chars.append(chr(b))
             else:
-                res.append("-")
-        return "".join(res)
+                chars.append("-")
+        return "".join(chars)
 
     @classmethod
     def parse_file(cls, file_path_str: str, use_cache: bool = True) -> List[DLTMessage]:
@@ -131,314 +92,295 @@ class DLTParser:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         cache_file: Optional[Path] = None
+
         if use_cache:
             cls.CACHE_DIR.mkdir(parents=True, exist_ok=True)
             sig = hashlib.md5(
                 f"{file_path.resolve()}_{file_path.stat().st_size}_{cls.VERSION}".encode("utf-8")
             ).hexdigest()
             cache_file = cls.CACHE_DIR / f"{sig}.json"
+
             if cache_file.exists():
                 with open(cache_file, "r", encoding="utf-8") as f:
-                    return [DLTMessage.from_dict(d) for d in json.load(f)]
+                    return [DLTMessage.from_dict(item) for item in json.load(f)]
 
         with open(file_path, "rb") as f:
             buf = f.read()
 
-        # gzip support
         if buf.startswith(b"\x1f\x8b"):
             try:
                 buf = gzip.decompress(buf)
             except Exception:
-                # keep original buffer if not valid gzip after all
                 pass
 
-        msgs = cls.parse_buffer(buf)
+        messages = cls.parse_buffer(buf)
 
         if use_cache and cache_file is not None:
             with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump([m.to_dict() for m in msgs], f, indent=2)
+                json.dump([m.to_dict() for m in messages], f, indent=2, ensure_ascii=False)
 
-        return msgs
+        return messages
 
     @classmethod
     def parse_buffer(cls, buf: bytes) -> List[DLTMessage]:
-        msgs: List[DLTMessage] = []
-        off = 0
+        messages: List[DLTMessage] = []
+        offset = 0
         total = len(buf)
-        idx = 0
+        global_index = 0
 
         last_sec = 0
         last_usec = 0
         last_ecu = "N/A"
 
-        while off < total:
-            # Storage header starts with DLT\x01
-            if buf[off:off + 4] == b"DLT\x01":
-                if off + 16 > total:
+        while offset < total:
+            # Storage header
+            if buf[offset:offset + 4] == b"DLT\x01":
+                if offset + 16 > total:
                     break
 
-                # storage header (little-endian for sec/usec in your shared parser)
-                last_sec, last_usec = struct.unpack_from("<II", buf, off + 4)
+                last_sec, last_usec = struct.unpack_from("<II", buf, offset + 4)
                 last_ecu = (
-                    buf[off + 12:off + 16]
+                    buf[offset + 12:offset + 16]
                     .decode("ascii", "ignore")
                     .strip("\x00")
                     .strip()
                 )
-                off += 16
+                offset += 16
 
-            if off + 4 > total:
+            if offset + 4 > total:
                 break
 
-            # standard header
-            htyp = buf[off]
-            mscnt = buf[off + 1]
-            length = struct.unpack_from(">H", buf, off + 2)[0]
+            htyp = buf[offset]
+            mcnt = buf[offset + 1]
+            length = struct.unpack_from(">H", buf, offset + 2)[0]
 
-            if length < 4 or off + length > total:
-                off += 1
+            if length < 4 or offset + length > total:
+                offset += 1
                 continue
 
-            msg_buf = buf[off:off + length]
-            h_off = 4
+            msg_buf = buf[offset:offset + length]
+            header_offset = 4
 
             ecu_id = last_ecu
-            sid = 0
-            tms = 0
+            session_id = 0
+            timestamp_raw = 0
 
-            # optional fields from standard header flags
+            # Standard header optional fields
             if htyp & 0x04:
                 ecu_id = (
-                    msg_buf[h_off:h_off + 4]
+                    msg_buf[header_offset:header_offset + 4]
                     .decode("ascii", "ignore")
                     .strip("\x00")
                     .strip()
                 )
-                h_off += 4
+                header_offset += 4
 
             if htyp & 0x08:
-                sid = struct.unpack_from(">I", msg_buf, h_off)[0]
-                h_off += 4
+                session_id = struct.unpack_from(">I", msg_buf, header_offset)[0]
+                header_offset += 4
 
             if htyp & 0x10:
-                tms = struct.unpack_from(">I", msg_buf, h_off)[0]
-                h_off += 4
+                timestamp_raw = struct.unpack_from(">I", msg_buf, header_offset)[0]
+                header_offset += 4
 
             use_ext_header = (htyp & 0x01) != 0
             msbf = (htyp & 0x02) != 0
             endian = ">" if msbf else "<"
 
             app_id = "N/A"
-            ctx_id = "N/A"
-            mtype = "log"
-            msubtype = "info"
-            verb = False
-            n_args = 0
+            context_id = "N/A"
+            msg_type = "log"
+            msg_subtype = "info"
+            verbose_mode = False
+            nargs = 0
 
             if use_ext_header:
-                if h_off + 10 > len(msg_buf):
-                    off += length
+                if header_offset + 10 > len(msg_buf):
+                    offset += length
                     continue
 
-                msinfo = msg_buf[h_off]
-                n_args = msg_buf[h_off + 1]
-                app_id = msg_buf[h_off + 2:h_off + 6].decode("ascii", "ignore").strip("\x00").strip()
-                ctx_id = msg_buf[h_off + 6:h_off + 10].decode("ascii", "ignore").strip("\x00").strip()
+                msin = msg_buf[header_offset]
+                nargs = msg_buf[header_offset + 1]
+                app_id = msg_buf[header_offset + 2:header_offset + 6].decode("ascii", "ignore").strip("\x00").strip()
+                context_id = msg_buf[header_offset + 6:header_offset + 10].decode("ascii", "ignore").strip("\x00").strip()
 
-                verb = (msinfo & 0x01) != 0
-                mstp = (msinfo >> 1) & 0x07
-                mtin = (msinfo >> 4) & 0x0F
+                verbose_mode = (msin & 0x01) != 0
+                mstp = (msin >> 1) & 0x07
+                mtin = (msin >> 4) & 0x0F
 
                 if mstp < 5:
-                    mtype = ["log", "app_trace", "nw_trace", "control", "unknown"][mstp]
+                    msg_type = ["log", "app_trace", "nw_trace", "control", "unknown"][mstp]
                 else:
-                    mtype = "unknown"
+                    msg_type = "unknown"
 
                 if mstp == 0:
-                    # log levels
-                    if mtin < 7:
-                        msubtype = ["", "fatal", "error", "warn", "info", "debug", "verbose"][mtin]
-                    else:
-                        msubtype = "info"
+                    msg_subtype = ["", "fatal", "error", "warn", "info", "debug", "verbose"][mtin] if mtin < 7 else "info"
                 elif mstp == 3:
-                    # control
-                    if mtin < 4:
-                        msubtype = ["", "request", "response", "time"][mtin]
-                    else:
-                        msubtype = "request"
+                    msg_subtype = ["", "request", "response", "time"][mtin] if mtin < 4 else "request"
 
-                h_off += 10
+                header_offset += 10
 
             payload_parts: List[str] = []
-            final_nargs = n_args
+            final_nargs = nargs
 
-            # -----------------------------------------------------------------
             # Control message decoding
-            # -----------------------------------------------------------------
-            if mtype == "control":
+            if msg_type == "control":
                 final_nargs = 0
-                if h_off + 4 <= len(msg_buf):
-                    ctrl_sid = struct.unpack_from(f"{endian}I", msg_buf, h_off)[0]
+                if header_offset + 4 <= len(msg_buf):
+                    ctrl_sid = struct.unpack_from(f"{endian}I", msg_buf, header_offset)[0]
                     svc_name = CONTROL_SERVICES.get(ctrl_sid, f"0x{ctrl_sid:02x}")
 
-                    if msubtype == "response" and h_off + 5 <= len(msg_buf):
-                        status_byte = msg_buf[h_off + 4]
-                        payload_parts.append(
-                            f"[{svc_name} {CONTROL_STATUS.get(status_byte, str(status_byte))}]"
-                        )
-                        rem = msg_buf[h_off + 5:]
+                    if msg_subtype == "response" and header_offset + 5 <= len(msg_buf):
+                        status_byte = msg_buf[header_offset + 4]
+                        payload_parts.append(f"[{svc_name} {CONTROL_STATUS.get(status_byte, str(status_byte))}]")
+                        rem = msg_buf[header_offset + 5:]
                         if rem:
                             payload_parts.append(rem.hex(" "))
                     else:
                         payload_parts.append(f"[{svc_name}]")
-                        rem = msg_buf[h_off + 4:]
+                        rem = msg_buf[header_offset + 4:]
                         if rem:
                             payload_parts.append(rem.hex(" "))
 
-            # -----------------------------------------------------------------
             # Verbose payload decoding
-            # -----------------------------------------------------------------
-            elif verb and n_args > 0:
-                p_off = h_off
+            elif verbose_mode and nargs > 0:
+                payload_offset = header_offset
 
-                for _ in range(n_args):
-                    if p_off + 4 > len(msg_buf):
+                for _ in range(nargs):
+                    if payload_offset + 4 > len(msg_buf):
                         break
 
-                    tinfo = struct.unpack_from(f"{endian}I", msg_buf, p_off)[0]
-                    p_off += 4
+                    type_info = struct.unpack_from(f"{endian}I", msg_buf, payload_offset)[0]
+                    payload_offset += 4
 
-                    # Skip variable name metadata if present
-                    if tinfo & 0x800:
-                        if p_off + 2 > len(msg_buf):
+                    # Variable name metadata
+                    if type_info & 0x800:
+                        if payload_offset + 2 > len(msg_buf):
                             break
-                        nlen = struct.unpack_from(f"{endian}H", msg_buf, p_off)[0]
-                        p_off += 2 + nlen
+                        name_len = struct.unpack_from(f"{endian}H", msg_buf, payload_offset)[0]
+                        payload_offset += 2 + name_len
 
-                    # Skip unit/info metadata if present
-                    if tinfo & 0xE0:
-                        if p_off + 2 > len(msg_buf):
+                    # Unit / info metadata
+                    if type_info & 0xE0:
+                        if payload_offset + 2 > len(msg_buf):
                             break
-                        ulen = struct.unpack_from(f"{endian}H", msg_buf, p_off)[0]
-                        p_off += 2 + ulen
+                        unit_len = struct.unpack_from(f"{endian}H", msg_buf, payload_offset)[0]
+                        payload_offset += 2 + unit_len
 
-                    tyle = tinfo & 0x0F
+                    type_len = type_info & 0x0F
 
-                    # STRING
-                    if tinfo & 0x200:
-                        if p_off + 2 > len(msg_buf):
+                    # String
+                    if type_info & 0x200:
+                        if payload_offset + 2 > len(msg_buf):
                             break
-                        slen = struct.unpack_from(f"{endian}H", msg_buf, p_off)[0]
-                        p_off += 2
-                        raw = msg_buf[p_off:p_off + slen]
+                        str_len = struct.unpack_from(f"{endian}H", msg_buf, payload_offset)[0]
+                        payload_offset += 2
+                        raw = msg_buf[payload_offset:payload_offset + str_len]
                         text = raw.split(b"\x00")[0]
                         payload_parts.append(cls.clean_verbose(text))
-                        p_off += slen
+                        payload_offset += str_len
 
-                    # BOOL
-                    elif tinfo & 0x10:
-                        if p_off + 1 > len(msg_buf):
+                    # Bool
+                    elif type_info & 0x10:
+                        if payload_offset + 1 > len(msg_buf):
                             break
-                        payload_parts.append("true" if msg_buf[p_off] else "false")
-                        p_off += 1
+                        payload_parts.append("true" if msg_buf[payload_offset] else "false")
+                        payload_offset += 1
 
-                    # SIGNED / UNSIGNED integer
-                    elif tinfo & 0x40 or tinfo & 0x20:
-                        size = {1: 1, 2: 2, 3: 4, 4: 8}.get(tyle, 1)
-                        if p_off + size > len(msg_buf):
+                    # Signed / Unsigned integers
+                    elif type_info & 0x40 or type_info & 0x20:
+                        size = {1: 1, 2: 2, 3: 4, 4: 8}.get(type_len, 1)
+                        if payload_offset + size > len(msg_buf):
                             break
 
-                        if tinfo & 0x20:
+                        if type_info & 0x20:
                             fmt_map = {1: "b", 2: "h", 4: "i", 8: "q"}
                         else:
                             fmt_map = {1: "B", 2: "H", 4: "I", 8: "Q"}
 
                         fmt = fmt_map[size]
-                        val = struct.unpack_from(f"{endian}{fmt}", msg_buf, p_off)[0]
+                        value = struct.unpack_from(f"{endian}{fmt}", msg_buf, payload_offset)[0]
 
-                        if tinfo & 0x10000:
-                            payload_parts.append(f"0x{val:x}")
+                        if type_info & 0x10000:
+                            payload_parts.append(f"0x{value:x}")
                         else:
-                            payload_parts.append(str(val))
+                            payload_parts.append(str(value))
 
-                        p_off += size
+                        payload_offset += size
 
-                    # FLOAT
-                    elif tinfo & 0x80:
-                        size = 4 if tyle == 3 else 8
-                        if p_off + size > len(msg_buf):
+                    # Float
+                    elif type_info & 0x80:
+                        size = 4 if type_len == 3 else 8
+                        if payload_offset + size > len(msg_buf):
                             break
+
                         if size == 4:
-                            fval = struct.unpack_from(f"{endian}f", msg_buf, p_off)[0]
+                            value = struct.unpack_from(f"{endian}f", msg_buf, payload_offset)[0]
                         else:
-                            fval = struct.unpack_from(f"{endian}d", msg_buf, p_off)[0]
-                        payload_parts.append(f"{fval:.3f}".rstrip("0").rstrip("."))
-                        p_off += size
+                            value = struct.unpack_from(f"{endian}d", msg_buf, payload_offset)[0]
 
-                    # RAW/BLOB
-                    elif tinfo & 0x400:
-                        if p_off + 2 > len(msg_buf):
+                        payload_parts.append(f"{value:.3f}".rstrip("0").rstrip("."))
+                        payload_offset += size
+
+                    # Raw / blob
+                    elif type_info & 0x400:
+                        if payload_offset + 2 > len(msg_buf):
                             break
-                        rlen = struct.unpack_from(f"{endian}H", msg_buf, p_off)[0]
-                        p_off += 2
-                        payload_parts.append(msg_buf[p_off:p_off + rlen].hex(" "))
-                        p_off += rlen
+                        raw_len = struct.unpack_from(f"{endian}H", msg_buf, payload_offset)[0]
+                        payload_offset += 2
+                        payload_parts.append(msg_buf[payload_offset:payload_offset + raw_len].hex(" "))
+                        payload_offset += raw_len
 
                     else:
-                        # Unknown verbose argument type -> bail out of arg loop safely
                         break
 
-            # -----------------------------------------------------------------
-            # Non-verbose / raw payload fallback
-            # -----------------------------------------------------------------
+            # Non-verbose fallback
             else:
                 final_nargs = 0
-                if h_off + 4 <= len(msg_buf):
-                    msg_id = struct.unpack_from(f"{endian}I", msg_buf, h_off)[0]
-                    raw_tail = msg_buf[h_off + 4:]
+                if header_offset + 4 <= len(msg_buf):
+                    msg_id = struct.unpack_from(f"{endian}I", msg_buf, header_offset)[0]
+                    raw_tail = msg_buf[header_offset + 4:]
                     payload_parts.append(f"[{msg_id}] {cls.clean_raw(raw_tail)}")
                 else:
-                    raw_tail = msg_buf[h_off:]
+                    raw_tail = msg_buf[header_offset:]
                     payload_parts.append(cls.clean_raw(raw_tail))
 
-            # Build wall time using same UTC+1 offset behavior from shared parser
             dt = datetime.datetime.fromtimestamp(last_sec, datetime.timezone.utc) + datetime.timedelta(hours=1)
 
-            msgs.append(
+            messages.append(
                 DLTMessage(
-                    index=idx,
+                    index=global_index,
                     time=dt.strftime("%Y/%m/%d %H:%M:%S") + f".{last_usec:06d}",
-                    timestamp=round(tms / 10000.0, 4),
-                    count=mscnt,
+                    timestamp=round(timestamp_raw / 10000.0, 4),
+                    count=mcnt,
                     ecuId=ecu_id,
                     appId=app_id,
-                    contextId=ctx_id,
-                    sessionId=sid,
-                    type=mtype,
-                    subtype=msubtype,
-                    mode="verbose" if verb else "non-verbose",
+                    contextId=context_id,
+                    sessionId=session_id,
+                    type=msg_type,
+                    subtype=msg_subtype,
+                    mode="verbose" if verbose_mode else "non-verbose",
                     nArgs=final_nargs,
                     payload=" ".join(part for part in payload_parts if part).strip(),
                 )
             )
 
-            off += length
-            idx += 1
+            offset += length
+            global_index += 1
 
-        return msgs
+        return messages
 
-
-# ============================================================================
-# Controller
-# ============================================================================
 
 class DLTController:
-    """Orchestrates parsing while preserving exact physical sequence."""
+    """
+    Controller for parsing one file, multiple files, or a folder.
+    """
 
     SUPPORTED_EXTENSIONS = {".dlt", ".gz"}
 
     def collect_supported_files_from_folder(self, folder: str | Path) -> List[Path]:
         folder_path = Path(folder)
+
         if not folder_path.exists():
             raise FileNotFoundError(f"Folder not found: {folder_path}")
 
@@ -446,166 +388,33 @@ class DLTController:
         for p in sorted(folder_path.iterdir()):
             if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTENSIONS:
                 files.append(p)
+
         return files
 
     def parse_file(self, file_path: str | Path) -> List[DLTMessage]:
         return DLTParser.parse_file(str(file_path))
 
     def parse_files(self, file_paths: Sequence[str | Path]) -> List[DLTMessage]:
-        all_msgs: List[DLTMessage] = []
+        all_messages: List[DLTMessage] = []
         global_index = 0
 
         for fp in file_paths:
             msgs = self.parse_file(fp)
-            for m in msgs:
-                # Re-index globally to preserve combined physical sequence
-                m.index = global_index
+            for msg in msgs:
+                msg.index = global_index
                 global_index += 1
-                all_msgs.append(m)
+                all_messages.append(msg)
 
-        return all_msgs
+        return all_messages
 
     def parse_path(self, path: str | Path) -> List[DLTMessage]:
         p = Path(path)
+
         if p.is_file():
             return self.parse_file(p)
+
         if p.is_dir():
-            return self.parse_files(self.collect_supported_files_from_folder(p))
+            files = self.collect_supported_files_from_folder(p)
+            return self.parse_files(files)
+
         raise FileNotFoundError(f"Input path not found: {p}")
-
-
-# ============================================================================
-# CLI formatting + saving
-# ============================================================================
-
-def format_txt_line(m: DLTMessage) -> str:
-    """
-    Formats a DLT message matching the exact truth column sequence:
-    Index Time Timestamp Count ECU AppID ContextID SessionID Type Subtype Mode NArgs Payload
-    """
-    parts = [
-        str(m.index),
-        m.time,
-        f"{m.timestamp}",
-        str(m.count),
-        m.ecuId,
-        m.appId,
-        m.contextId,
-        str(m.sessionId),
-        m.type,
-        m.subtype,
-        m.mode,
-        str(m.nArgs),
-        m.payload,
-    ]
-    return " ".join(parts)
-
-
-def save_json(messages: Sequence[DLTMessage], out_path: str | Path) -> None:
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump([m.to_dict() for m in messages], f, indent=2, ensure_ascii=False)
-
-
-def save_txt(messages: Sequence[DLTMessage], out_path: str | Path) -> None:
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        for m in messages:
-            f.write(format_txt_line(m) + "\n")
-
-
-def save_csv(messages: Sequence[DLTMessage], out_path: str | Path) -> None:
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            "Index", "Time", "Timestamp", "Count", "ECU", "AppID", "ContextID",
-            "SessionID", "Type", "Subtype", "Mode", "NArgs", "Payload"
-        ])
-        for m in messages:
-            writer.writerow([
-                m.index, m.time, m.timestamp, m.count, m.ecuId, m.appId,
-                m.contextId, m.sessionId, m.type, m.subtype, m.mode,
-                m.nArgs, m.payload
-            ])
-
-
-# ============================================================================
-# CLI
-# ============================================================================
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Single-file DLT Parser (merged model/parser/controller/cli)"
-    )
-    sub = parser.add_subparsers(dest="command")
-
-    p_parse = sub.add_parser("parse", help="Parse a DLT file or a folder of DLT files")
-    p_parse.add_argument("input", help="Input .dlt/.gz file or folder")
-    p_parse.add_argument(
-        "-o", "--output",
-        help="Output file path. If omitted, prints a preview only."
-    )
-    p_parse.add_argument(
-        "--format",
-        choices=["json", "txt", "csv"],
-        default="json",
-        help="Output format when --output is provided"
-    )
-    p_parse.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="Disable JSON cache for file parsing"
-    )
-    p_parse.add_argument(
-        "--preview",
-        type=int,
-        default=10,
-        help="Number of preview lines to print when no output file is specified"
-    )
-
-    return parser
-
-
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = build_arg_parser()
-    args = parser.parse_args(argv)
-
-    if args.command != "parse":
-        parser.print_help()
-        return 1
-
-    controller = DLTController()
-    input_path = Path(args.input)
-
-    # Optional no-cache path for single file parsing
-    if input_path.is_file() and args.no_cache:
-        messages = DLTParser.parse_file(str(input_path), use_cache=False)
-    else:
-        messages = controller.parse_path(input_path)
-
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if args.format == "json":
-            save_json(messages, out_path)
-        elif args.format == "txt":
-            save_txt(messages, out_path)
-        elif args.format == "csv":
-            save_csv(messages, out_path)
-
-        print(f"[OK] Parsed {len(messages)} message(s)")
-        print(f"[OK] Saved {args.format.upper()} to: {out_path}")
-    else:
-        print(f"[OK] Parsed {len(messages)} message(s)")
-        print(f"[Preview: first {min(args.preview, len(messages))} message(s)]")
-        for m in messages[:args.preview]:
-            print(format_txt_line(m))
-
-    return 0
-
-
-# Public exports to mirror the role of __init__.py
-__all__ = ["DLTMessage", "DLTParser", "DLTController", "format_txt_line", "main"]
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
