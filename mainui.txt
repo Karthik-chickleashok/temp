@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import json
-import os
+from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 from parser.dlt_parser import DLTParser
-from feature_extractor.feature_extractor import FeatureExtractor
 
 
 class CCU2AnalyzerUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("CCU2 Diagnosis Tool")
-        self.root.geometry("1100x700")
+        self.root.geometry("1150x720")
 
-        self.file_path: str | None = None
+        self.input_mode: str | None = None
+        self.selected_files: list[str] = []
+        self.selected_folder: str | None = None
+
         self.parsed_data = None
-        self.feature_result = None
 
         self._build_ui()
 
@@ -25,28 +26,36 @@ class CCU2AnalyzerUI:
         top = tk.Frame(self.root)
         top.pack(fill=tk.X, padx=10, pady=8)
 
-        self.file_label = tk.Label(
+        self.selection_label = tk.Label(
             top,
-            text="No file selected",
+            text="No input selected",
             anchor="w",
             relief=tk.SUNKEN,
-            padx=8
+            padx=8,
         )
-        self.file_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.selection_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        tk.Button(top, text="Browse", width=12, command=self.browse_file).pack(side=tk.RIGHT, padx=5)
+        browse_frame = tk.Frame(top)
+        browse_frame.pack(side=tk.RIGHT)
+
+        tk.Button(browse_frame, text="Browse File", width=12, command=self.browse_single_file).pack(side=tk.LEFT, padx=4)
+        tk.Button(browse_frame, text="Browse Files", width=12, command=self.browse_multiple_files).pack(side=tk.LEFT, padx=4)
+        tk.Button(browse_frame, text="Browse Folder", width=12, command=self.browse_folder).pack(side=tk.LEFT, padx=4)
 
         controls = tk.Frame(self.root)
         controls.pack(fill=tk.X, padx=10, pady=5)
 
-        self.btn_parse = tk.Button(controls, text="Parse", width=14, state=tk.DISABLED, command=self.parse_file)
+        self.btn_parse = tk.Button(controls, text="Parse", width=14, state=tk.DISABLED, command=self.parse_selection)
         self.btn_parse.pack(side=tk.LEFT, padx=5)
 
-        self.btn_extract = tk.Button(controls, text="Extract Features", width=16, state=tk.DISABLED, command=self.extract_features)
-        self.btn_extract.pack(side=tk.LEFT, padx=5)
-
-        self.btn_save = tk.Button(controls, text="Save Report", width=14, state=tk.DISABLED, command=self.save_report)
-        self.btn_save.pack(side=tk.LEFT, padx=5)
+        self.btn_save_parsed = tk.Button(
+            controls,
+            text="Save Parsed JSON",
+            width=16,
+            state=tk.DISABLED,
+            command=self.save_parsed_json,
+        )
+        self.btn_save_parsed.pack(side=tk.LEFT, padx=5)
 
         self.btn_clear = tk.Button(controls, text="Clear", width=12, command=self.clear_output)
         self.btn_clear.pack(side=tk.LEFT, padx=5)
@@ -54,9 +63,9 @@ class CCU2AnalyzerUI:
         self.output_text = tk.Text(self.root, wrap=tk.WORD)
         self.output_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-    def browse_file(self) -> None:
+    def browse_single_file(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select log or JSON file",
+            title="Select one file",
             filetypes=[
                 ("Supported files", "*.txt *.dlt *.json"),
                 ("Text log files", "*.txt *.dlt"),
@@ -67,68 +76,109 @@ class CCU2AnalyzerUI:
         if not path:
             return
 
-        self.file_path = path
-        self.file_label.config(text=path)
+        self.input_mode = "single"
+        self.selected_files = [path]
+        self.selected_folder = None
 
-        self.parsed_data = None
-        self.feature_result = None
+        self._reset_after_selection()
+        self.selection_label.config(text=f"Single file: {path}")
+        self._set_output_text(f"Selected single file:\n{path}\n")
 
-        self.btn_parse.config(state=tk.NORMAL)
-        self.btn_extract.config(state=tk.DISABLED)
-        self.btn_save.config(state=tk.DISABLED)
-
-        self._set_output_text(f"Selected file:\n{path}\n")
-
-    def parse_file(self) -> None:
-        if not self.file_path:
-            messagebox.showwarning("No file", "Please select a file first.")
+    def browse_multiple_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Select multiple files",
+            filetypes=[
+                ("Supported files", "*.txt *.dlt *.json"),
+                ("Text log files", "*.txt *.dlt"),
+                ("JSON files", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not paths:
             return
 
-        try:
-            ext = os.path.splitext(self.file_path)[1].lower()
+        self.input_mode = "multiple"
+        self.selected_files = list(paths)
+        self.selected_folder = None
 
-            if ext == ".json":
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    self.parsed_data = json.load(f)
+        self._reset_after_selection()
+        summary = "\n".join(self.selected_files[:20])
+        extra = ""
+        if len(self.selected_files) > 20:
+            extra = f"\n... and {len(self.selected_files) - 20} more file(s)"
+        self.selection_label.config(text=f"Multiple files selected: {len(self.selected_files)}")
+        self._set_output_text(f"Selected multiple files ({len(self.selected_files)}):\n{summary}{extra}\n")
+
+    def browse_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Select folder")
+        if not folder:
+            return
+
+        self.input_mode = "folder"
+        self.selected_files = []
+        self.selected_folder = folder
+
+        self._reset_after_selection()
+        self.selection_label.config(text=f"Folder: {folder}")
+        self._set_output_text(f"Selected folder:\n{folder}\n")
+
+    def parse_selection(self) -> None:
+        if not self.input_mode:
+            messagebox.showwarning("No input", "Please select a file, files, or folder first.")
+            return
+
+        parser = DLTParser()
+
+        try:
+            if self.input_mode == "single":
+                self.parsed_data = parser.parse_file(self.selected_files[0])
+                source_files = [Path(self.selected_files[0]).name]
+
+            elif self.input_mode == "multiple":
+                self.parsed_data = parser.parse_files(self.selected_files)
+                source_files = [Path(p).name for p in self.selected_files]
+
+            elif self.input_mode == "folder":
+                files = parser.collect_supported_files_from_folder(self.selected_folder)
+                if not files:
+                    messagebox.showwarning("No files", "No supported files found in selected folder.")
+                    return
+                self.parsed_data = parser.parse_files(files)
+                source_files = [p.name for p in files]
+
             else:
-                parser = DLTParser()
-                self.parsed_data = parser.parse_file(self.file_path)
+                raise ValueError(f"Unsupported input mode: {self.input_mode}")
 
             row_count = len(self.parsed_data) if isinstance(self.parsed_data, list) else 0
-            self._set_output_text(
+            preview = self.parsed_data[:20] if isinstance(self.parsed_data, list) else self.parsed_data
+
+            source_preview = "\n".join(source_files[:20])
+            if len(source_files) > 20:
+                source_preview += f"\n... and {len(source_files) - 20} more file(s)"
+
+            output = (
                 f"Parse successful.\n\n"
-                f"File: {self.file_path}\n"
-                f"Total parsed rows: {row_count}\n"
+                f"Input mode: {self.input_mode}\n"
+                f"Total source files: {len(source_files)}\n"
+                f"Total parsed rows: {row_count}\n\n"
+                f"Source files:\n{source_preview}\n\n"
+                f"Preview (first 20 rows):\n\n"
+                f"{json.dumps(preview, indent=2)}"
             )
 
-            self.btn_extract.config(state=tk.NORMAL)
-            self.btn_save.config(state=tk.DISABLED)
+            self._set_output_text(output)
+            self.btn_save_parsed.config(state=tk.NORMAL)
 
         except Exception as e:
             messagebox.showerror("Parse Error", str(e))
 
-    def extract_features(self) -> None:
+    def save_parsed_json(self) -> None:
         if not self.parsed_data:
-            messagebox.showwarning("No data", "Please parse a file first.")
-            return
-
-        try:
-            extractor = FeatureExtractor()
-            self.feature_result = extractor.extract(self.parsed_data)
-
-            self._set_output_text(json.dumps(self.feature_result, indent=2))
-            self.btn_save.config(state=tk.NORMAL)
-
-        except Exception as e:
-            messagebox.showerror("Feature Extraction Error", str(e))
-
-    def save_report(self) -> None:
-        if not self.feature_result:
-            messagebox.showwarning("No report", "Nothing to save yet.")
+            messagebox.showwarning("No parsed data", "Please parse input first.")
             return
 
         path = filedialog.asksaveasfilename(
-            title="Save report",
+            title="Save parsed JSON",
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
         )
@@ -137,22 +187,28 @@ class CCU2AnalyzerUI:
 
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.feature_result, f, indent=2)
+                json.dump(self.parsed_data, f, indent=2)
 
-            messagebox.showinfo("Saved", f"Report saved successfully:\n{path}")
+            messagebox.showinfo("Saved", f"Parsed JSON saved successfully:\n{path}")
 
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
     def clear_output(self) -> None:
-        self.file_path = None
+        self.input_mode = None
+        self.selected_files = []
+        self.selected_folder = None
         self.parsed_data = None
-        self.feature_result = None
-        self.file_label.config(text="No file selected")
+
+        self.selection_label.config(text="No input selected")
         self.btn_parse.config(state=tk.DISABLED)
-        self.btn_extract.config(state=tk.DISABLED)
-        self.btn_save.config(state=tk.DISABLED)
+        self.btn_save_parsed.config(state=tk.DISABLED)
         self._set_output_text("")
+
+    def _reset_after_selection(self) -> None:
+        self.parsed_data = None
+        self.btn_parse.config(state=tk.NORMAL)
+        self.btn_save_parsed.config(state=tk.DISABLED)
 
     def _set_output_text(self, text: str) -> None:
         self.output_text.delete("1.0", tk.END)
