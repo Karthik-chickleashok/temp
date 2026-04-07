@@ -1,70 +1,315 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import json
+import re
+from collections import Counter
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
 class FeatureExtractor:
     """
-    Extract structured diagnostic signals from parsed CCU2 logs.
+    Generic offline log feature extractor.
+
+    Input:
+        rows: list[dict]
+            Each row is expected to follow the normalized structure, e.g.:
+            {
+              "line_no": 0,
+              "timestamp": "2026/01/30 11:40:40.083000",
+              "relative_timestamp": 6.0302,
+              "count": 0,
+              "ecu": "CCU2",
+              "app": "DAI",
+              "context": "DC1",
+              "session_id": 0,
+              "type": "control",
+              "subtype": "response",
+              "mode": "non-verbose",
+              "nargs": 0,
+              "level": "response",
+              "payload": "[get_log_info 7] ...",
+              "source_file": "MSM_RefLogs.dlt"
+            }
+
+    Output:
+        {
+          "summary": {
+            "total_logs": 0,
+            "total_errors": 0,
+            "total_warnings": 0
+          },
+          "key_events": [],
+          "error_events": [],
+          "warning_events": [],
+          "keywords": [],
+          "missing_expected_events": [],
+          "sequence_observations": [],
+          "candidate_domain": "GENERIC",
+          "event_flags": {},
+          "evidence_refs": []
+        }
     """
 
+    EVENT_PATTERNS: Dict[str, Tuple[str, ...]] = {
+        "request": ("request", "requested", "req"),
+        "response": ("response", "responded", "resp"),
+        "ack": ("ack", "acked", "acknowledge", "acknowledged"),
+        "timeout": ("timeout", "timed out", "time out"),
+        "ready": ("ready", "initialized", "initialised", "available"),
+        "connected": ("connected", "connection established", "online"),
+        "attached": ("attached",),
+        "received": ("received", "recv", "rx"),
+        "sent": ("sent", "transmitted", "tx"),
+        "forwarded": ("forwarded", "relayed", "routed"),
+        "published": ("published",),
+        "dropped": ("dropped", "discarded", "drop"),
+        "failed": ("failed", "failure", "error", "abort", "aborted", "unavailable"),
+        "rejected": ("rejected", "denied"),
+        "started": ("started", "start", "launched", "spawn"),
+        "stopped": ("stopped", "stop", "terminated", "shutdown"),
+    }
+
+    ERROR_TERMS: Tuple[str, ...] = (
+        "timeout",
+        "failed",
+        "error",
+        "rejected",
+        "unavailable",
+        "abort",
+        "drop",
+        "dropped",
+        "failure",
+    )
+
+    WARNING_TERMS: Tuple[str, ...] = (
+        "warning",
+        "warn",
+        "retry",
+        "delayed",
+    )
+
+    DOMAIN_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+        "NETWORK": (
+            "network",
+            "route",
+            "routing",
+            "link",
+            "socket",
+            "port",
+            "packet",
+            "bridge",
+        ),
+        "GATEWAY": (
+            "gateway",
+            "proxy",
+            "relay",
+            "forward",
+            "forwarded",
+            "bridge",
+        ),
+        "CONNECTIVITY": (
+            "connect",
+            "connected",
+            "attach",
+            "attached",
+            "session",
+            "online",
+            "offline",
+            "ready",
+        ),
+        "DIAGNOSTICS": (
+            "diag",
+            "diagnostic",
+            "trace",
+            "debug",
+            "monitor",
+            "health",
+            "fault",
+            "error",
+            "warn",
+        ),
+        "CONTROL": (
+            "control",
+            "request",
+            "response",
+            "ack",
+            "command",
+            "start",
+            "stop",
+        ),
+    }
+
+    STOPWORDS: Set[str] = {
+        "",
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "to",
+        "was",
+        "were",
+        "with",
+        "this",
+        "will",
+        "not",
+        "done",
+        "true",
+        "false",
+        "ok",
+        "info",
+        "log",
+        "logs",
+        "main",
+        "data",
+    }
+
     def extract(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        total_logs = len(rows)
+
+        event_flags: Dict[str, bool] = {
+            "request_seen": False,
+            "response_seen": False,
+            "ack_seen": False,
+            "timeout_seen": False,
+            "ready_seen": False,
+            "connected_seen": False,
+            "attached_seen": False,
+            "data_received": False,
+            "data_sent": False,
+            "data_forwarded": False,
+            "data_dropped": False,
+            "failed_seen": False,
+        }
+
         key_events: List[str] = []
-        error_events: List[str] = []
-        warning_events: List[str] = []
+        error_events: List[Dict[str, Any]] = []
+        warning_events: List[Dict[str, Any]] = []
         keywords: List[str] = []
         evidence_refs: List[Dict[str, Any]] = []
 
-        event_flags = {
-            "find_service_seen": False,
-            "offer_service_seen": False,
-            "subscribe_eventgroup_seen": False,
-            "subscribe_ack_seen": False,
-            "timeout_seen": False,
-            "lte_registered": False,
-            "data_sent": False,
-            "data_received": False,
-            "data_dropped": False,
-            "forward_seen": False,
-            "publish_seen": False,
-            "modem_ready": False,
-            "bearer_active": False,
-        }
+        # Internal tracking for sequence / evidence
+        event_rows: Dict[str, List[Dict[str, Any]]] = {event: [] for event in self.EVENT_PATTERNS}
+        error_rows: List[Dict[str, Any]] = []
+        warning_rows: List[Dict[str, Any]] = []
 
         for row in rows:
-            payload_original = str(row.get("payload", "") or "")
-            payload = self._normalize_text(payload_original)
-            app = self._normalize_text(str(row.get("app", "") or ""))
-            context = self._normalize_text(str(row.get("context", "") or ""))
-            level = self._normalize_text(str(row.get("level", "") or ""))
+            row_text_parts = [
+                row.get("app", ""),
+                row.get("context", ""),
+                row.get("type", ""),
+                row.get("subtype", ""),
+                row.get("level", ""),
+                row.get("payload", ""),
+            ]
+            joined_text = " ".join(str(part) for part in row_text_parts if part is not None)
+            normalized_text = self._normalize_text(joined_text)
 
-            joined_text = f"{app} {context} {payload}"
+            row_keywords = self._extract_keywords(row)
+            for kw in row_keywords:
+                self._add_unique(keywords, kw)
 
-            self._extract_keywords(joined_text, keywords)
-            row_triggered = self._extract_events(payload, key_events, event_flags)
+            detected_events = self._extract_events(row)
+            for event_name in detected_events:
+                self._add_unique(key_events, event_name)
+                event_rows[event_name].append(row)
 
-            is_error = ("error" in level or "fail" in level or any(
-                token in payload for token in [
-                    "timeout", "failed", "error", "rejected", "unavailable", "drop", "dropped"
-                ]
-            ))
-            if is_error:
-                self._add_unique(error_events, payload_original)
-                row_triggered = True
+            # Set flags
+            if "request" in detected_events:
+                event_flags["request_seen"] = True
+            if "response" in detected_events:
+                event_flags["response_seen"] = True
+            if "ack" in detected_events:
+                event_flags["ack_seen"] = True
+            if "timeout" in detected_events:
+                event_flags["timeout_seen"] = True
+            if "ready" in detected_events:
+                event_flags["ready_seen"] = True
+            if "connected" in detected_events:
+                event_flags["connected_seen"] = True
+            if "attached" in detected_events:
+                event_flags["attached_seen"] = True
+            if "received" in detected_events:
+                event_flags["data_received"] = True
+            if "sent" in detected_events or "published" in detected_events:
+                event_flags["data_sent"] = True
+            if "forwarded" in detected_events:
+                event_flags["data_forwarded"] = True
+            if "dropped" in detected_events:
+                event_flags["data_dropped"] = True
+            if "failed" in detected_events or "rejected" in detected_events or "timeout" in detected_events:
+                event_flags["failed_seen"] = True
 
-            is_warning = ("warn" in level or "warning" in payload)
-            if is_warning:
-                self._add_unique(warning_events, payload_original)
-                row_triggered = True
+            # Error detection
+            if self._is_error_row(row, normalized_text):
+                error_event = {
+                    "line_no": row.get("line_no", -1),
+                    "timestamp": row.get("timestamp", ""),
+                    "payload": row.get("payload", ""),
+                    "source_file": row.get("source_file", ""),
+                }
+                error_events.append(error_event)
+                error_rows.append(row)
 
-            if row_triggered:
-                self._collect_evidence(row, evidence_refs)
+            # Warning detection
+            if self._is_warning_row(row, normalized_text):
+                warning_event = {
+                    "line_no": row.get("line_no", -1),
+                    "timestamp": row.get("timestamp", ""),
+                    "payload": row.get("payload", ""),
+                    "source_file": row.get("source_file", ""),
+                }
+                warning_events.append(warning_event)
+                warning_rows.append(row)
 
         missing_expected_events = self._detect_missing_events(event_flags)
         sequence_observations = self._build_sequence_observations(event_flags)
-        candidate_domain = self._detect_domain(keywords)
+        candidate_domain = self._detect_domain(keywords, rows)
+
+        # Evidence collection
+        evidence_refs.extend(self._collect_evidence(error_rows))
+        evidence_refs.extend(self._collect_evidence(warning_rows))
+
+        # Collect evidence for missing expected events / sequence observations
+        if "response" in missing_expected_events:
+            evidence_refs.extend(self._collect_evidence(event_rows.get("request", [])))
+        if "forward/send" in missing_expected_events:
+            evidence_refs.extend(self._collect_evidence(event_rows.get("received", [])))
+        if "readiness" in missing_expected_events:
+            op_rows = (
+                event_rows.get("request", [])
+                + event_rows.get("sent", [])
+                + event_rows.get("forwarded", [])
+                + event_rows.get("started", [])
+                + event_rows.get("connected", [])
+                + event_rows.get("attached", [])
+            )
+            evidence_refs.extend(self._collect_evidence(op_rows))
+        if event_flags.get("failed_seen") and event_flags.get("request_seen"):
+            evidence_refs.extend(self._collect_evidence(event_rows.get("failed", []) + event_rows.get("rejected", []) + event_rows.get("timeout", [])))
+
+        # Final dedupe of evidence_refs
+        evidence_refs = self._dedupe_evidence(evidence_refs)
 
         return {
+            "summary": {
+                "total_logs": total_logs,
+                "total_errors": len(error_events),
+                "total_warnings": len(warning_events),
+            },
             "key_events": key_events,
             "error_events": error_events,
             "warning_events": warning_events,
@@ -76,173 +321,332 @@ class FeatureExtractor:
             "evidence_refs": evidence_refs,
         }
 
-    def _normalize_text(self, text: str) -> str:
-        return text.replace("\x00", "").strip().lower() if text else ""
+    def _normalize_text(self, text: Any) -> str:
+        """
+        Normalize free text for deterministic matching:
+        - lowercase
+        - collapse separators/punctuation into spaces
+        - collapse whitespace
+        """
+        if text is None:
+            return ""
+        value = str(text).lower()
+        value = re.sub(r"[_:/\-\[\]\(\)\{\}<>,;=|]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
 
-    def _add_unique(self, items: List[str], value: str) -> None:
-        if value not in items:
-            items.append(value)
+    def _add_unique(self, target: List[Any], item: Any) -> None:
+        """Append item if not already present, preserving insertion order."""
+        if item not in target:
+            target.append(item)
 
-    def _extract_keywords(self, text: str, keywords: List[str]) -> None:
-        keyword_list = [
-            "gateway", "forward", "forwarded", "routing", "route", "drop", "dropped",
-            "received", "send", "publish",
-            "modem", "sim", "apn", "attach", "detach", "registration", "bearer",
-            "lte", "network", "signal", "backend", "data session", "pdp",
-            "someip", "findservice", "offerservice", "subscribeeventgroup", "subscribeack",
-            "uds", "nrc", "diagnostic session", "security access",
-            "doip",
-            "boot", "startup", "init", "ready",
+    def _extract_keywords(self, row: Dict[str, Any]) -> List[str]:
+        """
+        Extract generic keywords from app, context, type, subtype, payload.
+        Keeps this protocol-agnostic and deterministic.
+        """
+        fields = [
+            row.get("app", ""),
+            row.get("context", ""),
+            row.get("type", ""),
+            row.get("subtype", ""),
+            row.get("payload", ""),
         ]
-        for kw in keyword_list:
-            if kw in text:
-                self._add_unique(keywords, kw)
 
-    def _extract_events(self, payload: str, key_events: List[str], flags: Dict[str, bool]) -> bool:
-        triggered = False
+        keywords: List[str] = []
+        for field in fields:
+            normalized = self._normalize_text(field)
+            if not normalized:
+                continue
 
-        if "findservice" in payload:
-            flags["find_service_seen"] = True
-            self._add_unique(key_events, "FindService")
-            triggered = True
+            # Whole-field keyword
+            if len(normalized) <= 32 and normalized not in self.STOPWORDS:
+                self._add_unique(keywords, normalized)
 
-        if "offerservice" in payload:
-            flags["offer_service_seen"] = True
-            self._add_unique(key_events, "OfferService")
-            triggered = True
+            # Tokenized keywords
+            for token in normalized.split():
+                if (
+                    token not in self.STOPWORDS
+                    and len(token) >= 3
+                    and not token.isdigit()
+                    and not self._is_mostly_hex(token)
+                ):
+                    self._add_unique(keywords, token)
 
-        if "subscribeeventgroup" in payload:
-            flags["subscribe_eventgroup_seen"] = True
-            self._add_unique(key_events, "SubscribeEventgroup")
-            triggered = True
+        return keywords
 
-        if "subscribeack" in payload:
-            flags["subscribe_ack_seen"] = True
-            self._add_unique(key_events, "SubscribeAck")
-            triggered = True
+    def _extract_events(self, row: Dict[str, Any]) -> List[str]:
+        """
+        Detect generic events from payload/app/context/type/subtype/level.
+        """
+        fields = [
+            row.get("payload", ""),
+            row.get("app", ""),
+            row.get("context", ""),
+            row.get("type", ""),
+            row.get("subtype", ""),
+            row.get("level", ""),
+        ]
+        normalized_text = self._normalize_text(" ".join(str(f) for f in fields if f is not None))
 
-        if "timeout" in payload:
-            flags["timeout_seen"] = True
-            self._add_unique(key_events, "Timeout")
-            triggered = True
+        detected: List[str] = []
+        for event_name, patterns in self.EVENT_PATTERNS.items():
+            if any(self._contains_term(normalized_text, pattern) for pattern in patterns):
+                self._add_unique(detected, event_name)
 
-        if "received" in payload:
-            flags["data_received"] = True
-            self._add_unique(key_events, "DataReceived")
-            triggered = True
+        return detected
 
-        if "send" in payload:
-            flags["data_sent"] = True
-            self._add_unique(key_events, "Send")
-            triggered = True
-
-        if "publish" in payload:
-            flags["publish_seen"] = True
-            flags["data_sent"] = True
-            self._add_unique(key_events, "Publish")
-            triggered = True
-
-        if "forwarded" in payload or "forward " in payload or payload.startswith("forward"):
-            flags["forward_seen"] = True
-            self._add_unique(key_events, "Forward")
-            triggered = True
-
-        if "drop" in payload or "dropped" in payload:
-            flags["data_dropped"] = True
-            self._add_unique(key_events, "Drop")
-            triggered = True
-
-        if "modem ready" in payload:
-            flags["modem_ready"] = True
-            self._add_unique(key_events, "ModemReady")
-            triggered = True
-
-        if any(phrase in payload for phrase in [
-            "lte registration success",
-            "network attached",
-            "attach complete",
-            "bearer active",
-            "pdp active",
-        ]):
-            flags["lte_registered"] = True
-            if "bearer active" in payload or "pdp active" in payload:
-                flags["bearer_active"] = True
-            self._add_unique(key_events, "LTEReady")
-            triggered = True
-
-        return triggered
-
-    def _detect_missing_events(self, flags: Dict[str, bool]) -> List[str]:
+    def _detect_missing_events(self, event_flags: Dict[str, bool]) -> List[str]:
+        """
+        Infer missing expected events using generic logic.
+        """
         missing: List[str] = []
 
-        if flags["find_service_seen"] and not flags["offer_service_seen"]:
-            missing.append("OfferService")
+        if event_flags.get("request_seen") and not event_flags.get("response_seen"):
+            self._add_unique(missing, "response")
 
-        if flags["subscribe_eventgroup_seen"] and not flags["subscribe_ack_seen"]:
-            missing.append("SubscribeAck")
+        if event_flags.get("data_received") and not event_flags.get("data_sent") and not event_flags.get("data_forwarded"):
+            self._add_unique(missing, "forward/send")
 
-        if flags["data_sent"] and not flags["lte_registered"]:
-            missing.append("LTE readiness")
+        operation_attempted = any(
+            event_flags.get(name, False)
+            for name in (
+                "request_seen",
+                "data_sent",
+                "data_forwarded",
+                "connected_seen",
+                "attached_seen",
+            )
+        )
+        if operation_attempted and not event_flags.get("ready_seen"):
+            self._add_unique(missing, "readiness")
 
         return missing
 
-    def _build_sequence_observations(self, flags: Dict[str, bool]) -> List[str]:
+    def _build_sequence_observations(self, event_flags: Dict[str, bool]) -> List[str]:
+        """
+        Build generic sequence observations from flags.
+        """
         observations: List[str] = []
 
-        if flags["find_service_seen"] and not flags["offer_service_seen"]:
-            observations.append("Client request observed without provider response.")
+        if event_flags.get("request_seen") and not event_flags.get("response_seen"):
+            self._add_unique(observations, "Request observed without matching response.")
 
-        if flags["data_received"] and not (flags["data_sent"] or flags["forward_seen"] or flags["publish_seen"]):
-            observations.append("Data received but not forwarded.")
+        if event_flags.get("data_received") and not event_flags.get("data_sent") and not event_flags.get("data_forwarded"):
+            self._add_unique(observations, "Data received but not forwarded.")
 
-        if flags["data_sent"] and not flags["lte_registered"]:
-            observations.append("Data send attempted before LTE/network was ready.")
+        operation_attempted = any(
+            event_flags.get(name, False)
+            for name in (
+                "request_seen",
+                "data_sent",
+                "data_forwarded",
+                "connected_seen",
+                "attached_seen",
+            )
+        )
+        if operation_attempted and not event_flags.get("ready_seen"):
+            self._add_unique(observations, "Operation attempted before readiness.")
 
-        if flags["data_dropped"]:
-            observations.append("Data dropped during gateway flow.")
+        if event_flags.get("failed_seen") and event_flags.get("request_seen"):
+            self._add_unique(observations, "Failure observed after request.")
+
+        if event_flags.get("timeout_seen"):
+            self._add_unique(observations, "Timeout observed during operation flow.")
+
+        if event_flags.get("data_dropped"):
+            self._add_unique(observations, "Data drop observed in processing path.")
 
         return observations
 
-    def _collect_evidence(self, row: Dict[str, Any], evidence: List[Dict[str, Any]]) -> None:
-        ref = {
-            "line_no": row.get("line_no"),
-            "timestamp": row.get("timestamp"),
-            "payload": row.get("payload"),
-        }
-        if ref not in evidence:
-            evidence.append(ref)
+    def _collect_evidence(self, rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Convert source rows into normalized evidence references.
+        """
+        evidence: List[Dict[str, Any]] = []
+        for row in rows:
+            evidence.append(
+                {
+                    "line_no": row.get("line_no", -1),
+                    "timestamp": row.get("timestamp", ""),
+                    "payload": row.get("payload", ""),
+                    "source_file": row.get("source_file", ""),
+                }
+            )
+        return evidence
 
-    def _detect_domain(self, keywords: List[str]) -> str:
-        scores = {
-            "SOME/IP": 0,
-            "LTE": 0,
-            "TELEMATICS": 0,
-            "GATEWAY": 0,
-            "UDS": 0,
-            "DoIP": 0,
-            "BOOT": 0,
-            "GENERIC": 0,
-        }
+    def _detect_domain(self, keywords: List[str], rows: List[Dict[str, Any]]) -> str:
+        """
+        Detect a generic candidate domain by scoring app/context/payload keywords.
+        Returns one of:
+            NETWORK | GATEWAY | CONNECTIVITY | DIAGNOSTICS | CONTROL | GENERIC
+        """
+        # Expand scoring text with row app/context/payload to make detection less brittle
+        corpus_parts: List[str] = list(keywords)
+        for row in rows[:5000]:
+            corpus_parts.extend(
+                [
+                    self._normalize_text(row.get("app", "")),
+                    self._normalize_text(row.get("context", "")),
+                    self._normalize_text(row.get("payload", "")),
+                    self._normalize_text(row.get("type", "")),
+                    self._normalize_text(row.get("subtype", "")),
+                ]
+            )
 
-        for kw in keywords:
-            if kw in {"someip", "findservice", "offerservice", "subscribeeventgroup", "subscribeack"}:
-                scores["SOME/IP"] += 2
-            elif kw in {"lte", "attach", "bearer", "network", "pdp"}:
-                scores["LTE"] += 2
-            elif kw in {"modem", "backend", "data session", "sim", "apn"}:
-                scores["TELEMATICS"] += 2
-            elif kw in {"gateway", "forward", "forwarded", "routing", "route", "drop", "dropped"}:
-                scores["GATEWAY"] += 2
-            elif kw in {"uds", "nrc", "diagnostic session", "security access"}:
-                scores["UDS"] += 2
-            elif kw == "doip":
-                scores["DoIP"] += 2
-            elif kw in {"boot", "startup", "init", "ready"}:
-                scores["BOOT"] += 2
+        corpus = " ".join(part for part in corpus_parts if part)
 
-        priority = ["SOME/IP", "LTE", "TELEMATICS", "GATEWAY", "UDS", "DoIP", "BOOT", "GENERIC"]
-        best_score = max(scores.values())
-        for domain in priority:
-            if scores[domain] == best_score:
-                return domain
-        return "GENERIC"
+        scores: Dict[str, int] = {domain: 0 for domain in self.DOMAIN_KEYWORDS}
+        for domain, domain_terms in self.DOMAIN_KEYWORDS.items():
+            for term in domain_terms:
+                scores[domain] += len(re.findall(rf"\b{re.escape(term)}\b", corpus))
+
+        best_domain = "GENERIC"
+        best_score = 0
+        for domain in ("NETWORK", "GATEWAY", "CONNECTIVITY", "DIAGNOSTICS", "CONTROL"):
+            score = scores[domain]
+            if score > best_score:
+                best_score = score
+                best_domain = domain
+
+        return best_domain if best_score > 0 else "GENERIC"
+
+    def _is_error_row(self, row: Dict[str, Any], normalized_text: str) -> bool:
+        """
+        Error row detection:
+        - level/subtype/type containing error/fail
+        - payload containing timeout, failed, error, rejected, unavailable, abort, drop
+        """
+        fields_to_check = [
+            self._normalize_text(row.get("level", "")),
+            self._normalize_text(row.get("subtype", "")),
+            self._normalize_text(row.get("type", "")),
+        ]
+
+        if any(("error" in field or "fail" in field) for field in fields_to_check):
+            return True
+
+        return any(self._contains_term(normalized_text, term) for term in self.ERROR_TERMS)
+
+    def _is_warning_row(self, row: Dict[str, Any], normalized_text: str) -> bool:
+        """
+        Warning row detection:
+        - level/subtype containing warn
+        - payload containing warning, retry, delayed
+        """
+        level_text = self._normalize_text(row.get("level", ""))
+        subtype_text = self._normalize_text(row.get("subtype", ""))
+
+        if "warn" in level_text or "warn" in subtype_text:
+            return True
+
+        return any(self._contains_term(normalized_text, term) for term in self.WARNING_TERMS)
+
+    def _contains_term(self, normalized_text: str, term: str) -> bool:
+        """
+        Whole-word / phrase contains check against normalized text.
+        """
+        normalized_term = self._normalize_text(term)
+        if not normalized_term:
+            return False
+        return re.search(rf"\b{re.escape(normalized_term)}\b", normalized_text) is not None
+
+    def _is_mostly_hex(self, token: str) -> bool:
+        """
+        Filter likely hex-ish payload fragments from keywords.
+        """
+        if len(token) < 6:
+            return False
+        return re.fullmatch(r"[0-9a-f]+", token) is not None
+
+    def _dedupe_evidence(self, evidence_refs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen: Set[Tuple[Any, Any, Any, Any]] = set()
+        deduped: List[Dict[str, Any]] = []
+        for ref in evidence_refs:
+            key = (
+                ref.get("line_no", -1),
+                ref.get("timestamp", ""),
+                ref.get("payload", ""),
+                ref.get("source_file", ""),
+            )
+            if key not in seen:
+                seen.add(key)
+                deduped.append(ref)
+        return deduped
+
+
+if __name__ == "__main__":
+    sample_rows: List[Dict[str, Any]] = [
+        {
+            "line_no": 0,
+            "timestamp": "2026/01/30 11:40:40.000000",
+            "relative_timestamp": 0.001,
+            "count": 0,
+            "ecu": "CCU2",
+            "app": "APP",
+            "context": "CTRL",
+            "session_id": 0,
+            "type": "control",
+            "subtype": "request",
+            "mode": "non-verbose",
+            "nargs": 0,
+            "level": "request",
+            "payload": "request sent to worker",
+            "source_file": "sample.dlt",
+        },
+        {
+            "line_no": 1,
+            "timestamp": "2026/01/30 11:40:40.010000",
+            "relative_timestamp": 0.011,
+            "count": 1,
+            "ecu": "CCU2",
+            "app": "APP",
+            "context": "PIPE",
+            "session_id": 0,
+            "type": "log",
+            "subtype": "info",
+            "mode": "verbose",
+            "nargs": 1,
+            "level": "info",
+            "payload": "data received from source",
+            "source_file": "sample.dlt",
+        },
+        {
+            "line_no": 2,
+            "timestamp": "2026/01/30 11:40:40.020000",
+            "relative_timestamp": 0.021,
+            "count": 2,
+            "ecu": "CCU2",
+            "app": "APP",
+            "context": "PIPE",
+            "session_id": 0,
+            "type": "log",
+            "subtype": "warn",
+            "mode": "verbose",
+            "nargs": 1,
+            "level": "warn",
+            "payload": "retry delayed due to worker unavailable",
+            "source_file": "sample.dlt",
+        },
+        {
+            "line_no": 3,
+            "timestamp": "2026/01/30 11:40:40.030000",
+            "relative_timestamp": 0.031,
+            "count": 3,
+            "ecu": "CCU2",
+            "app": "APP",
+            "context": "PIPE",
+            "session_id": 0,
+            "type": "log",
+            "subtype": "error",
+            "mode": "verbose",
+            "nargs": 1,
+            "level": "error",
+            "payload": "operation failed after timeout",
+            "source_file": "sample.dlt",
+        },
+    ]
+
+    extractor = FeatureExtractor()
+    result = extractor.extract(sample_rows)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
