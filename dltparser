@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 class DLTParser:
     """
-    Simple text-based DLT parser.
+    Simple text/JSON parser for log ingestion.
 
-    Expected flexible format per line:
+    Supported inputs:
+    - .txt / .dlt : parsed line-by-line using a flexible token split
+    - .json       : loaded as parsed rows if already structured
+
+    Expected flexible text line format:
     timestamp ECU APP CONTEXT LEVEL payload...
 
     Example:
@@ -15,18 +21,87 @@ class DLTParser:
     12:00:03.456 CCU2 SOMEIP SD ERROR Timeout waiting for OfferService
     """
 
-    def parse_file(self, file_path: str) -> List[Dict[str, Any]]:
+    SUPPORTED_TEXT_EXTENSIONS = {".txt", ".dlt"}
+    SUPPORTED_JSON_EXTENSIONS = {".json"}
+    SUPPORTED_EXTENSIONS = SUPPORTED_TEXT_EXTENSIONS | SUPPORTED_JSON_EXTENSIONS
+
+    def parse_file(self, file_path: str | Path) -> List[Dict[str, Any]]:
+        path = Path(file_path)
+        ext = path.suffix.lower()
+
+        if ext in self.SUPPORTED_JSON_EXTENSIONS:
+            return self._parse_json_file(path)
+        if ext in self.SUPPORTED_TEXT_EXTENSIONS:
+            return self._parse_text_file(path)
+
+        raise ValueError(f"Unsupported file type: {path.name}")
+
+    def parse_files(self, file_paths: List[str | Path]) -> List[Dict[str, Any]]:
+        combined_rows: List[Dict[str, Any]] = []
+
+        for file_path in file_paths:
+            rows = self.parse_file(file_path)
+            combined_rows.extend(rows)
+
+        return combined_rows
+
+    def collect_supported_files_from_folder(self, folder_path: str | Path) -> List[Path]:
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            raise ValueError(f"Not a folder: {folder}")
+
+        files = [
+            p for p in sorted(folder.iterdir())
+            if p.is_file() and p.suffix.lower() in self.SUPPORTED_EXTENSIONS
+        ]
+        return files
+
+    def parse_folder(self, folder_path: str | Path) -> List[Dict[str, Any]]:
+        files = self.collect_supported_files_from_folder(folder_path)
+        return self.parse_files(files)
+
+    def _parse_json_file(self, path: Path) -> List[Dict[str, Any]]:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            raise ValueError(f"JSON file must contain a list of parsed rows: {path.name}")
+
+        rows: List[Dict[str, Any]] = []
+        for idx, row in enumerate(data, start=1):
+            if not isinstance(row, dict):
+                continue
+            normalized = {
+                "line_no": row.get("line_no", idx),
+                "timestamp": row.get("timestamp", ""),
+                "ecu": row.get("ecu", ""),
+                "app": row.get("app", ""),
+                "context": row.get("context", ""),
+                "level": row.get("level", ""),
+                "payload": row.get("payload", ""),
+                "source_file": row.get("source_file", path.name),
+            }
+            rows.append(normalized)
+
+        return rows
+
+    def _parse_text_file(self, path: Path) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
 
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with path.open("r", encoding="utf-8", errors="ignore") as f:
             for idx, line in enumerate(f, start=1):
-                parsed = self._parse_line(line.rstrip("\n"), idx)
+                parsed = self._parse_text_line(line.rstrip("\n"), idx, path.name)
                 if parsed is not None:
                     rows.append(parsed)
 
         return rows
 
-    def _parse_line(self, line: str, line_no: int) -> Optional[Dict[str, Any]]:
+    def _parse_text_line(
+        self,
+        line: str,
+        line_no: int,
+        source_file: str,
+    ) -> Optional[Dict[str, Any]]:
         if not line or not line.strip():
             return None
 
@@ -41,6 +116,7 @@ class DLTParser:
                 "context": "",
                 "level": "",
                 "payload": line.strip(),
+                "source_file": source_file,
             }
 
         timestamp = parts[0]
@@ -58,4 +134,5 @@ class DLTParser:
             "context": context,
             "level": level,
             "payload": payload,
+            "source_file": source_file,
         }
