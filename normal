@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Sequence
+
+
+class DLTNormalizer:
+    """
+    Converts parsed DLTMessage objects into normalized dict rows
+    used by the rest of the diagnosis tool.
+    """
+
+    @staticmethod
+    def normalize_message(msg: Any, source_file: str = "") -> Dict[str, Any]:
+        return {
+            "line_no": getattr(msg, "index", 0),
+            "timestamp": getattr(msg, "time", ""),
+            "relative_timestamp": getattr(msg, "timestamp", 0.0),
+            "count": getattr(msg, "count", 0),
+            "ecu": getattr(msg, "ecuId", ""),
+            "app": getattr(msg, "appId", ""),
+            "context": getattr(msg, "contextId", ""),
+            "session_id": getattr(msg, "sessionId", 0),
+            "type": getattr(msg, "type", ""),
+            "subtype": getattr(msg, "subtype", ""),
+            "mode": getattr(msg, "mode", ""),
+            "nargs": getattr(msg, "nArgs", 0),
+            "level": getattr(msg, "subtype", ""),   # bridge for generic extractor
+            "payload": getattr(msg, "payload", ""),
+            "source_file": source_file,
+        }
+
+    @classmethod
+    def normalize_messages(
+        cls,
+        messages: Sequence[Any],
+        source_file: str = "",
+    ) -> List[Dict[str, Any]]:
+        return [cls.normalize_message(msg, source_file=source_file) for msg in messages]
+
+    @classmethod
+    def normalize_grouped_messages(
+        cls,
+        grouped_messages: Sequence[tuple[str, Sequence[Any]]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Input:
+            [
+                ("file1.dlt", [msg1, msg2, ...]),
+                ("file2.dlt", [msg3, msg4, ...]),
+            ]
+        Output:
+            one merged normalized list
+        """
+        rows: List[Dict[str, Any]] = []
+        global_line_no = 0
+
+        for source_file, messages in grouped_messages:
+            normalized = cls.normalize_messages(messages, source_file=source_file)
+            for row in normalized:
+                row["line_no"] = global_line_no
+                global_line_no += 1
+                rows.append(row)
+
+        return rows
