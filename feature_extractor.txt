@@ -1,19 +1,19 @@
-from typing import List, Dict, Any
+from __future__ import annotations
+
+from typing import Any, Dict, List
 
 
 class FeatureExtractor:
     """
-    Extracts structured diagnostic signals from parsed DLT rows.
+    Extract structured diagnostic signals from parsed CCU2 logs.
     """
 
     def extract(self, rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-        key_events = []
-        error_events = []
-        warning_events = []
-        keywords = []
-        missing_expected_events = []
-        sequence_observations = []
-        evidence_refs = []
+        key_events: List[str] = []
+        error_events: List[str] = []
+        warning_events: List[str] = []
+        keywords: List[str] = []
+        evidence_refs: List[Dict[str, Any]] = []
 
         event_flags = {
             "find_service_seen": False,
@@ -25,35 +25,43 @@ class FeatureExtractor:
             "data_sent": False,
             "data_received": False,
             "data_dropped": False,
+            "forward_seen": False,
+            "publish_seen": False,
+            "modem_ready": False,
+            "bearer_active": False,
         }
 
         for row in rows:
-            payload_raw = row.get("payload", "")
-            payload = self._normalize_text(payload_raw)
-            level = (row.get("level") or "").lower()
+            payload_original = str(row.get("payload", "") or "")
+            payload = self._normalize_text(payload_original)
+            app = self._normalize_text(str(row.get("app", "") or ""))
+            context = self._normalize_text(str(row.get("context", "") or ""))
+            level = self._normalize_text(str(row.get("level", "") or ""))
 
-            # Keyword extraction
-            self._extract_keywords(payload, keywords)
+            joined_text = f"{app} {context} {payload}"
 
-            # Event detection
-            self._extract_events(payload, key_events, event_flags)
+            self._extract_keywords(joined_text, keywords)
+            row_triggered = self._extract_events(payload, key_events, event_flags)
 
-            # Error detection
-            if "error" in level or any(x in payload for x in ["timeout", "failed", "error", "rejected", "unavailable", "drop"]):
-                self._add_unique(error_events, payload_raw)
+            is_error = ("error" in level or "fail" in level or any(
+                token in payload for token in [
+                    "timeout", "failed", "error", "rejected", "unavailable", "drop", "dropped"
+                ]
+            ))
+            if is_error:
+                self._add_unique(error_events, payload_original)
+                row_triggered = True
+
+            is_warning = ("warn" in level or "warning" in payload)
+            if is_warning:
+                self._add_unique(warning_events, payload_original)
+                row_triggered = True
+
+            if row_triggered:
                 self._collect_evidence(row, evidence_refs)
 
-            # Warning detection
-            if "warn" in level or "warning" in payload:
-                self._add_unique(warning_events, payload_raw)
-
-        # Missing events
         missing_expected_events = self._detect_missing_events(event_flags)
-
-        # Sequence observations
         sequence_observations = self._build_sequence_observations(event_flags)
-
-        # Domain detection
         candidate_domain = self._detect_domain(keywords)
 
         return {
@@ -68,67 +76,104 @@ class FeatureExtractor:
             "evidence_refs": evidence_refs,
         }
 
-    # ------------------ Helpers ------------------
-
     def _normalize_text(self, text: str) -> str:
-        if not text:
-            return ""
-        return text.replace("\x00", "").lower().strip()
+        return text.replace("\x00", "").strip().lower() if text else ""
 
-    def _add_unique(self, lst: List[str], value: str):
-        if value not in lst:
-            lst.append(value)
+    def _add_unique(self, items: List[str], value: str) -> None:
+        if value not in items:
+            items.append(value)
 
-    def _extract_keywords(self, payload: str, keywords: List[str]):
-        kw_list = [
-            "gateway", "forward", "routing", "dropped", "received", "send", "publish",
+    def _extract_keywords(self, text: str, keywords: List[str]) -> None:
+        keyword_list = [
+            "gateway", "forward", "forwarded", "routing", "route", "drop", "dropped",
+            "received", "send", "publish",
             "modem", "sim", "apn", "attach", "detach", "registration", "bearer",
-            "lte", "network", "signal", "backend", "data session",
+            "lte", "network", "signal", "backend", "data session", "pdp",
             "someip", "findservice", "offerservice", "subscribeeventgroup", "subscribeack",
-            "uds", "nrc", "diagnostic", "security",
+            "uds", "nrc", "diagnostic session", "security access",
             "doip",
-            "boot", "startup", "init", "ready"
+            "boot", "startup", "init", "ready",
         ]
-
-        for kw in kw_list:
-            if kw in payload:
+        for kw in keyword_list:
+            if kw in text:
                 self._add_unique(keywords, kw)
 
-    def _extract_events(self, payload: str, key_events: List[str], flags: Dict):
+    def _extract_events(self, payload: str, key_events: List[str], flags: Dict[str, bool]) -> bool:
+        triggered = False
+
         if "findservice" in payload:
             flags["find_service_seen"] = True
             self._add_unique(key_events, "FindService")
+            triggered = True
 
         if "offerservice" in payload:
             flags["offer_service_seen"] = True
             self._add_unique(key_events, "OfferService")
+            triggered = True
 
         if "subscribeeventgroup" in payload:
             flags["subscribe_eventgroup_seen"] = True
             self._add_unique(key_events, "SubscribeEventgroup")
+            triggered = True
 
         if "subscribeack" in payload:
             flags["subscribe_ack_seen"] = True
             self._add_unique(key_events, "SubscribeAck")
+            triggered = True
 
         if "timeout" in payload:
             flags["timeout_seen"] = True
             self._add_unique(key_events, "Timeout")
-
-        if any(x in payload for x in ["send", "publish"]):
-            flags["data_sent"] = True
+            triggered = True
 
         if "received" in payload:
             flags["data_received"] = True
+            self._add_unique(key_events, "DataReceived")
+            triggered = True
 
-        if any(x in payload for x in ["drop", "dropped"]):
+        if "send" in payload:
+            flags["data_sent"] = True
+            self._add_unique(key_events, "Send")
+            triggered = True
+
+        if "publish" in payload:
+            flags["publish_seen"] = True
+            flags["data_sent"] = True
+            self._add_unique(key_events, "Publish")
+            triggered = True
+
+        if "forwarded" in payload or "forward " in payload or payload.startswith("forward"):
+            flags["forward_seen"] = True
+            self._add_unique(key_events, "Forward")
+            triggered = True
+
+        if "drop" in payload or "dropped" in payload:
             flags["data_dropped"] = True
+            self._add_unique(key_events, "Drop")
+            triggered = True
 
-        if any(x in payload for x in ["network attached", "attach complete", "bearer active", "pdp active"]):
+        if "modem ready" in payload:
+            flags["modem_ready"] = True
+            self._add_unique(key_events, "ModemReady")
+            triggered = True
+
+        if any(phrase in payload for phrase in [
+            "lte registration success",
+            "network attached",
+            "attach complete",
+            "bearer active",
+            "pdp active",
+        ]):
             flags["lte_registered"] = True
+            if "bearer active" in payload or "pdp active" in payload:
+                flags["bearer_active"] = True
+            self._add_unique(key_events, "LTEReady")
+            triggered = True
 
-    def _detect_missing_events(self, flags: Dict) -> List[str]:
-        missing = []
+        return triggered
+
+    def _detect_missing_events(self, flags: Dict[str, bool]) -> List[str]:
+        missing: List[str] = []
 
         if flags["find_service_seen"] and not flags["offer_service_seen"]:
             missing.append("OfferService")
@@ -141,29 +186,31 @@ class FeatureExtractor:
 
         return missing
 
-    def _build_sequence_observations(self, flags: Dict) -> List[str]:
-        obs = []
+    def _build_sequence_observations(self, flags: Dict[str, bool]) -> List[str]:
+        observations: List[str] = []
 
         if flags["find_service_seen"] and not flags["offer_service_seen"]:
-            obs.append("Client requested service but provider did not respond")
+            observations.append("Client request observed without provider response.")
 
-        if flags["data_received"] and not flags["data_sent"]:
-            obs.append("Data received but not forwarded")
+        if flags["data_received"] and not (flags["data_sent"] or flags["forward_seen"] or flags["publish_seen"]):
+            observations.append("Data received but not forwarded.")
 
         if flags["data_sent"] and not flags["lte_registered"]:
-            obs.append("Data send attempted before LTE/network ready")
+            observations.append("Data send attempted before LTE/network was ready.")
 
         if flags["data_dropped"]:
-            obs.append("Data dropped in gateway flow")
+            observations.append("Data dropped during gateway flow.")
 
-        return obs
+        return observations
 
-    def _collect_evidence(self, row: Dict, evidence: List[Dict]):
-        evidence.append({
+    def _collect_evidence(self, row: Dict[str, Any], evidence: List[Dict[str, Any]]) -> None:
+        ref = {
             "line_no": row.get("line_no"),
             "timestamp": row.get("timestamp"),
             "payload": row.get("payload"),
-        })
+        }
+        if ref not in evidence:
+            evidence.append(ref)
 
     def _detect_domain(self, keywords: List[str]) -> str:
         scores = {
@@ -174,35 +221,28 @@ class FeatureExtractor:
             "UDS": 0,
             "DoIP": 0,
             "BOOT": 0,
+            "GENERIC": 0,
         }
 
         for kw in keywords:
-            if kw in ["findservice", "offerservice", "subscribeeventgroup"]:
+            if kw in {"someip", "findservice", "offerservice", "subscribeeventgroup", "subscribeack"}:
                 scores["SOME/IP"] += 2
-            elif kw in ["lte", "attach", "bearer"]:
+            elif kw in {"lte", "attach", "bearer", "network", "pdp"}:
                 scores["LTE"] += 2
-            elif kw in ["modem", "backend"]:
+            elif kw in {"modem", "backend", "data session", "sim", "apn"}:
                 scores["TELEMATICS"] += 2
-            elif kw in ["gateway", "forward", "routing"]:
+            elif kw in {"gateway", "forward", "forwarded", "routing", "route", "drop", "dropped"}:
                 scores["GATEWAY"] += 2
-            elif kw in ["uds", "nrc"]:
+            elif kw in {"uds", "nrc", "diagnostic session", "security access"}:
                 scores["UDS"] += 2
-            elif kw in ["doip"]:
+            elif kw == "doip":
                 scores["DoIP"] += 2
-            elif kw in ["boot", "startup"]:
+            elif kw in {"boot", "startup", "init", "ready"}:
                 scores["BOOT"] += 2
 
-        return max(scores, key=scores.get)
-
-
-if __name__ == "__main__":
-    sample = [
-        {"line_no": 1, "timestamp": "12:00", "ecu": "CCU2", "app": "SOMEIP", "context": "SD", "level": "INFO", "payload": "FindService sent"},
-        {"line_no": 2, "timestamp": "12:03", "ecu": "CCU2", "app": "SOMEIP", "context": "SD", "level": "ERROR", "payload": "Timeout waiting for OfferService"},
-    ]
-
-    extractor = FeatureExtractor()
-    result = extractor.extract(sample)
-
-    from pprint import pprint
-    pprint(result)
+        priority = ["SOME/IP", "LTE", "TELEMATICS", "GATEWAY", "UDS", "DoIP", "BOOT", "GENERIC"]
+        best_score = max(scores.values())
+        for domain in priority:
+            if scores[domain] == best_score:
+                return domain
+        return "GENERIC"
