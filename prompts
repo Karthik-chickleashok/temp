@@ -200,3 +200,62 @@ Requirements:
     "conditions": {
       "must_have_keywords": [],
       "must_not
+
+
+
+
+
+Create a Python file requirement_evaluator.py.
+
+It should:
+- Read requirements.json from project root
+- Take two inputs:
+    1. normalized_rows (list of dict)
+    2. feature_output (dict from feature extractor)
+
+Implement class:
+class RequirementEvaluator:
+    def evaluate(self, rows, features) -> dict
+
+For each requirement in requirements.json:
+- Check:
+    must_have_keywords
+    must_not_have_keywords
+    must_have_flags
+    must_not_have_flags
+
+Matching:
+- Keywords → search in:
+    features["keywords"]
+    payloads from error_events, warning_events, evidence_refs
+
+- Flags → check in:
+    features["event_flags"]
+
+Rules:
+- If any must_not_have condition matches → FAIL
+- If must_have exists but not satisfied → FAIL
+- Else → PASS
+
+Return output:
+{
+  "summary": {
+    "total": int,
+    "passed": int,
+    "failed": int
+  },
+  "results": [
+    {
+      "feature_name": str,
+      "category": str,
+      "status": "PASS" | "FAIL",
+      "evidence_count": int
+    }
+  ]
+}
+
+Important:
+- No hardcoded logic (everything from requirements.json)
+- Case-insensitive matching
+- Handle missing requirements.json safely
+- Clean and simple code
