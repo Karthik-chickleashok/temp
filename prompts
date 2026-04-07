@@ -1,0 +1,123 @@
+Create a Python module named feature_extractor.py.
+
+Context:
+I am building an offline log diagnosis tool.
+Input logs are already normalized into a list of dict rows.
+
+Each input row looks like:
+{
+  "line_no": 0,
+  "timestamp": "2026/01/30 11:40:40.083000",
+  "relative_timestamp": 6.0302,
+  "count": 0,
+  "ecu": "CCU2",
+  "app": "DAI",
+  "context": "DC1",
+  "session_id": 0,
+  "type": "control",
+  "subtype": "response",
+  "mode": "non-verbose",
+  "nargs": 0,
+  "level": "response",
+  "payload": "[get_log_info 7] ...",
+  "source_file": "MSM_RefLogs.dlt"
+}
+
+Implement:
+class FeatureExtractor:
+    def extract(self, rows: list[dict]) -> dict
+
+Return one output dict in this exact structure:
+{
+  "summary": {
+    "total_logs": 0,
+    "total_errors": 0,
+    "total_warnings": 0
+  },
+  "key_events": [],
+  "error_events": [],
+  "warning_events": [],
+  "keywords": [],
+  "missing_expected_events": [],
+  "sequence_observations": [],
+  "candidate_domain": "GENERIC",
+  "event_flags": {},
+  "evidence_refs": []
+}
+
+Requirements:
+1. Keep this generic, not protocol-specific.
+2. Do not hardcode SOME/IP, APN, LTE, UDS, etc.
+3. Detect generic events from payload/app/context/type/subtype such as:
+   - request
+   - response
+   - ack
+   - timeout
+   - ready
+   - connected
+   - attached
+   - received
+   - sent
+   - forwarded
+   - published
+   - dropped
+   - failed
+   - rejected
+   - started
+   - stopped
+4. Build event_flags such as:
+   - request_seen
+   - response_seen
+   - ack_seen
+   - timeout_seen
+   - ready_seen
+   - connected_seen
+   - attached_seen
+   - data_received
+   - data_sent
+   - data_forwarded
+   - data_dropped
+   - failed_seen
+5. Detect error_events from:
+   - level/subtype/type containing error/fail
+   - payload containing timeout, failed, error, rejected, unavailable, abort, drop
+6. Detect warning_events from:
+   - level/subtype containing warn
+   - payload containing warning, retry, delayed
+7. Extract keywords from app, context, type, subtype, payload.
+8. Build missing_expected_events using generic logic, for example:
+   - if request_seen and not response_seen => "response"
+   - if data_received and not data_sent and not data_forwarded => "forward/send"
+   - if operation attempted and not ready_seen => "readiness"
+9. Build sequence_observations like:
+   - "Request observed without matching response."
+   - "Data received but not forwarded."
+   - "Operation attempted before readiness."
+   - "Failure observed after request."
+10. candidate_domain should be generic and keyword-scored from app/context/payload.
+    Return one of:
+    - NETWORK
+    - GATEWAY
+    - CONNECTIVITY
+    - DIAGNOSTICS
+    - CONTROL
+    - GENERIC
+11. evidence_refs should contain rows that contributed to findings in this format:
+{
+  "line_no": 0,
+  "timestamp": "",
+  "payload": "",
+  "source_file": ""
+}
+12. Keep code deterministic, modular, type-hinted, and pure Python.
+13. Add helper methods:
+   - _normalize_text
+   - _add_unique
+   - _extract_keywords
+   - _extract_events
+   - _detect_missing_events
+   - _build_sequence_observations
+   - _collect_evidence
+   - _detect_domain
+14. Add a small __main__ test with 4 sample rows.
+15. Return the complete drop-in file only.
