@@ -121,3 +121,82 @@ Requirements:
    - _detect_domain
 14. Add a small __main__ test with 4 sample rows.
 15. Return the complete drop-in file only.
+
+
+
+
+
+[
+  {
+    "feature_name": "apn_valid",
+    "category": "APN",
+    "description": "APN name should be valid and not unknown",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": ["unknown apn"],
+      "must_have_flags": [],
+      "must_not_have_flags": []
+    }
+  },
+  {
+    "feature_name": "ip_assignment_valid",
+    "category": "NETWORK",
+    "description": "IP should be assigned properly",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": ["src and dst ips are missing"],
+      "must_have_flags": [],
+      "must_not_have_flags": []
+    }
+  },
+  {
+    "feature_name": "no_timeout",
+    "category": "GENERAL",
+    "description": "System should not experience timeouts",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": ["timeout"],
+      "must_have_flags": [],
+      "must_not_have_flags": ["timeout_seen"]
+    }
+  },
+  {
+    "feature_name": "no_data_drop",
+    "category": "GATEWAY",
+    "description": "Data should not be dropped during processing",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": ["dropping", "dropped"],
+      "must_have_flags": [],
+      "must_not_have_flags": ["data_dropped"]
+    }
+  },
+  {
+    "feature_name": "request_response_sequence",
+    "category": "CONTROL",
+    "description": "Each request should have a corresponding response",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": [],
+      "must_have_flags": ["request_seen", "response_seen"],
+      "must_not_have_flags": []
+    }
+  },
+  {
+    "feature_name": "data_flow_continuity",
+    "category": "GATEWAY",
+    "description": "Data received should be forwarded or sent",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not_have_keywords": [],
+      "must_have_flags": ["data_received"],
+      "must_not_have_flags": ["data_dropped"]
+    }
+  },
+  {
+    "feature_name": "readiness_before_operation",
+    "category": "GENERAL",
+    "description": "System should be ready before performing operations",
+    "conditions": {
+      "must_have_keywords": [],
+      "must_not
