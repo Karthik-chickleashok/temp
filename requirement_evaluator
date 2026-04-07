@@ -1,10 +1,9 @@
-from pathlib import Path
-code = r'''from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
 class RequirementEvaluator:
@@ -24,11 +23,6 @@ class RequirementEvaluator:
         "must_not_have_flags": [...]
       }
     }
-
-    Evaluation rules:
-    - If any must_not_have condition matches -> FAIL
-    - If must_have exists but is not satisfied -> FAIL
-    - Else -> PASS
     """
 
     def __init__(self, requirements_path: Optional[str | Path] = None) -> None:
@@ -37,83 +31,159 @@ class RequirementEvaluator:
         self.requirements: List[Dict[str, Any]] = self._load_requirements()
 
     def evaluate(self, rows: List[Dict[str, Any]], features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate all requirements dynamically using:
+        - requirements.json
+        - feature extractor output
+        - normalized rows (currently kept for extensibility)
+        """
         requirements = self.requirements
         keyword_index = self._build_keyword_index(features)
-        normalized_feature_keywords = {self._normalize_text(k) for k in features.get("keywords", []) if k}
+        normalized_feature_keywords = {
+            self._normalize_text(k)
+            for k in features.get("keywords", [])
+            if k
+        }
         feature_flags = self._normalize_flag_map(features.get("event_flags", {}))
 
         results: List[Dict[str, Any]] = []
         passed = 0
         failed = 0
+        not_applicable = 0
 
         for req in requirements:
-            feature_name = str(req.get("feature_name", ""))
-            category = str(req.get("category", "GENERIC"))
-            conditions = req.get("conditions", {}) or {}
-
-            must_have_keywords = self._normalize_list(conditions.get("must_have_keywords", []))
-            must_not_have_keywords = self._normalize_list(conditions.get("must_not_have_keywords", []))
-            must_have_flags = self._normalize_list(conditions.get("must_have_flags", []))
-            must_not_have_flags = self._normalize_list(conditions.get("must_not_have_flags", []))
-
-            evidence_keys: Set[Tuple[Any, Any, Any, Any]] = set()
-
-            # Keyword matching domain:
-            #   1) features["keywords"]
-            #   2) payloads from error_events, warning_events, evidence_refs
-            matched_must_have_keywords = self._find_matching_keywords(
-                must_have_keywords,
-                normalized_feature_keywords,
-                keyword_index,
-                evidence_keys,
+            result = self._evaluate_requirement(
+                requirement=req,
+                feature_keywords=normalized_feature_keywords,
+                keyword_index=keyword_index,
+                feature_flags=feature_flags,
+                features=features,
             )
-            matched_must_not_keywords = self._find_matching_keywords(
-                must_not_have_keywords,
-                normalized_feature_keywords,
-                keyword_index,
-                evidence_keys,
-            )
+            results.append(result)
 
-            # Flag checks strictly against features["event_flags"]
-            matched_must_have_flags = self._find_matching_flags(must_have_flags, feature_flags)
-            matched_must_not_flags = self._find_matching_flags(must_not_have_flags, feature_flags)
-
-            has_forbidden_match = bool(matched_must_not_keywords or matched_must_not_flags)
-            missing_required_keywords = bool(must_have_keywords) and not bool(matched_must_have_keywords)
-            missing_required_flags = bool(must_have_flags) and not bool(matched_must_have_flags)
-
-            status = "PASS"
-            if has_forbidden_match or missing_required_keywords or missing_required_flags:
-                status = "FAIL"
-
-            evidence_count = len(evidence_keys) + len(matched_must_have_flags) + len(matched_must_not_flags)
-
+            status = result["status"]
             if status == "PASS":
                 passed += 1
-            else:
+            elif status == "FAIL":
                 failed += 1
-
-            results.append(
-                {
-                    "feature_name": feature_name,
-                    "category": category,
-                    "status": status,
-                    "evidence_count": evidence_count,
-                }
-            )
+            else:
+                not_applicable += 1
 
         return {
             "summary": {
                 "total": len(results),
                 "passed": passed,
                 "failed": failed,
+                "not_applicable": not_applicable,
             },
             "results": results,
         }
 
+    def _evaluate_requirement(
+        self,
+        requirement: Dict[str, Any],
+        feature_keywords: Set[str],
+        keyword_index: Dict[str, List[Tuple[Any, Any, Any, Any]]],
+        feature_flags: Dict[str, bool],
+        features: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        feature_name = str(requirement.get("feature_name", ""))
+        category = str(requirement.get("category", "GENERIC"))
+        description = str(requirement.get("description", ""))
+        conditions = requirement.get("conditions", {}) or {}
+
+        must_have_keywords = self._normalize_list(conditions.get("must_have_keywords", []))
+        must_not_have_keywords = self._normalize_list(conditions.get("must_not_have_keywords", []))
+        must_have_flags = self._normalize_list(conditions.get("must_have_flags", []))
+        must_not_have_flags = self._normalize_list(conditions.get("must_not_have_flags", []))
+
+        evidence_keys: Set[Tuple[Any, Any, Any, Any]] = set()
+
+        matched_must_have_keywords = self._find_matching_keywords(
+            requirement_keywords=must_have_keywords,
+            feature_keywords=feature_keywords,
+            keyword_index=keyword_index,
+            evidence_keys=evidence_keys,
+        )
+
+        matched_must_not_keywords = self._find_matching_keywords(
+            requirement_keywords=must_not_have_keywords,
+            feature_keywords=feature_keywords,
+            keyword_index=keyword_index,
+            evidence_keys=evidence_keys,
+        )
+
+        matched_must_have_flags = self._find_matching_flags(
+            requirement_flags=must_have_flags,
+            feature_flags=feature_flags,
+        )
+
+        matched_must_not_flags = self._find_matching_flags(
+            requirement_flags=must_not_have_flags,
+            feature_flags=feature_flags,
+        )
+
+        # Any forbidden match means FAIL
+        has_forbidden_match = bool(matched_must_not_keywords or matched_must_not_flags)
+
+        # All required items must match
+        missing_required_keywords = len(matched_must_have_keywords) < len(must_have_keywords)
+        missing_required_flags = len(matched_must_have_flags) < len(must_have_flags)
+
+        # Determine whether this requirement is even relevant in current feature context
+        referenced_keywords = set(self._normalize_text(x) for x in (
+            must_have_keywords + must_not_have_keywords
+        ) if x)
+
+        referenced_flags = set(self._normalize_text(x).replace(" ", "_") for x in (
+            must_have_flags + must_not_have_flags
+        ) if x)
+
+        any_keyword_relevant = self._any_requirement_keyword_relevant(
+            referenced_keywords,
+            feature_keywords,
+            keyword_index,
+        )
+
+        any_flag_relevant = self._any_requirement_flag_relevant(
+            referenced_flags,
+            feature_flags,
+        )
+
+        any_relevant_context = any_keyword_relevant or any_flag_relevant
+
+        if not any_relevant_context:
+            status = "NOT_APPLICABLE"
+        elif has_forbidden_match or missing_required_keywords or missing_required_flags:
+            status = "FAIL"
+        else:
+            status = "PASS"
+
+        details = {
+            "matched_must_have_keywords": matched_must_have_keywords,
+            "matched_must_not_have_keywords": matched_must_not_keywords,
+            "matched_must_have_flags": matched_must_have_flags,
+            "matched_must_not_have_flags": matched_must_not_flags,
+        }
+
+        evidence_count = len(evidence_keys) + len(matched_must_have_flags) + len(matched_must_not_flags)
+
+        return {
+            "feature_name": feature_name,
+            "category": category,
+            "description": description,
+            "status": status,
+            "details": details,
+            "evidence_count": evidence_count,
+        }
+
     def _load_requirements(self) -> List[Dict[str, Any]]:
+        """
+        Load requirements from JSON.
+        If the file is missing, return an empty list instead of crashing.
+        """
         if not self.requirements_path.exists():
-            raise FileNotFoundError(f"requirements.json not found: {self.requirements_path}")
+            return []
 
         with open(self.requirements_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -125,20 +195,21 @@ class RequirementEvaluator:
         for item in data:
             if isinstance(item, dict):
                 normalized.append(item)
+
         return normalized
 
     def _build_keyword_index(self, features: Dict[str, Any]) -> Dict[str, List[Tuple[Any, Any, Any, Any]]]:
         """
-        Build a search index from payload-bearing feature sections:
+        Build a searchable payload index from:
         - error_events
         - warning_events
         - evidence_refs
 
-        The index maps normalized payload text to a list of evidence tuples.
-        Evidence tuple format:
-            (line_no, timestamp, payload, source_file)
+        Maps normalized payload text to evidence tuples:
+        (line_no, timestamp, payload, source_file)
         """
         index: Dict[str, List[Tuple[Any, Any, Any, Any]]] = {}
+
         for section_name in ("error_events", "warning_events", "evidence_refs"):
             section = features.get(section_name, []) or []
             if not isinstance(section, list):
@@ -147,6 +218,7 @@ class RequirementEvaluator:
             for entry in section:
                 if not isinstance(entry, dict):
                     continue
+
                 payload = str(entry.get("payload", ""))
                 normalized_payload = self._normalize_text(payload)
                 if not normalized_payload:
@@ -159,6 +231,7 @@ class RequirementEvaluator:
                     entry.get("source_file", ""),
                 )
                 index.setdefault(normalized_payload, []).append(evidence)
+
         return index
 
     def _find_matching_keywords(
@@ -168,50 +241,66 @@ class RequirementEvaluator:
         keyword_index: Dict[str, List[Tuple[Any, Any, Any, Any]]],
         evidence_keys: Set[Tuple[Any, Any, Any, Any]],
     ) -> List[str]:
+        """
+        Find requirement keywords in:
+        - features["keywords"]
+        - payloads from indexed evidence sections
+        """
         matched: List[str] = []
+
         for raw_keyword in requirement_keywords:
             keyword = self._normalize_text(raw_keyword)
             if not keyword:
                 continue
 
-            # Match in features["keywords"]
+            found = False
+
+            # Exact match against extracted keywords
             if keyword in feature_keywords:
                 matched.append(keyword)
-                continue
+                found = True
 
-            # Match against payloads from error_events, warning_events, evidence_refs
-            found_in_payload = False
-            for payload_text, evidences in keyword_index.items():
-                if self._contains_term(payload_text, keyword):
-                    matched.append(keyword)
-                    found_in_payload = True
-                    for evidence in evidences:
-                        evidence_keys.add(evidence)
-                    break
-
-            if found_in_payload:
-                continue
+            # Match against payload evidence if not already found
+            if not found:
+                for payload_text, evidences in keyword_index.items():
+                    if self._contains_term(payload_text, keyword):
+                        matched.append(keyword)
+                        found = True
+                        for evidence in evidences:
+                            evidence_keys.add(evidence)
+                        break
 
         return matched
 
-    def _find_matching_flags(self, requirement_flags: Sequence[str], feature_flags: Dict[str, bool]) -> List[str]:
+    def _find_matching_flags(
+        self,
+        requirement_flags: Sequence[str],
+        feature_flags: Dict[str, bool],
+    ) -> List[str]:
+        """
+        Match required flags that are True in feature_flags.
+        """
         matched: List[str] = []
+
         for raw_flag in requirement_flags:
             normalized_flag = self._normalize_text(raw_flag).replace(" ", "_")
             if not normalized_flag:
                 continue
             if feature_flags.get(normalized_flag, False):
                 matched.append(normalized_flag)
+
         return matched
 
     def _normalize_flag_map(self, flags: Dict[str, Any]) -> Dict[str, bool]:
         normalized: Dict[str, bool] = {}
         if not isinstance(flags, dict):
             return normalized
+
         for key, value in flags.items():
             normalized_key = self._normalize_text(str(key)).replace(" ", "_")
             if normalized_key:
                 normalized[normalized_key] = bool(value)
+
         return normalized
 
     def _normalize_list(self, values: Any) -> List[str]:
@@ -234,6 +323,37 @@ class RequirementEvaluator:
             return False
         return re.search(rf"\b{re.escape(term)}\b", haystack) is not None
 
+    def _any_requirement_keyword_relevant(
+        self,
+        referenced_keywords: Set[str],
+        feature_keywords: Set[str],
+        keyword_index: Dict[str, List[Tuple[Any, Any, Any, Any]]],
+    ) -> bool:
+        """
+        Check whether any keyword mentioned in the requirement appears anywhere
+        in the extracted feature context.
+        """
+        for keyword in referenced_keywords:
+            if keyword in feature_keywords:
+                return True
+            for payload_text in keyword_index.keys():
+                if self._contains_term(payload_text, keyword):
+                    return True
+        return False
+
+    def _any_requirement_flag_relevant(
+        self,
+        referenced_flags: Set[str],
+        feature_flags: Dict[str, bool],
+    ) -> bool:
+        """
+        Check whether any flag mentioned in the requirement exists and is True.
+        """
+        for flag in referenced_flags:
+            if feature_flags.get(flag, False):
+                return True
+        return False
+
 
 if __name__ == "__main__":
     project_root = Path(__file__).resolve().parent
@@ -245,14 +365,10 @@ if __name__ == "__main__":
     else:
         with open(parsed_path, "r", encoding="utf-8") as f:
             rows = json.load(f)
+
         with open(features_path, "r", encoding="utf-8") as f:
             features = json.load(f)
 
         evaluator = RequirementEvaluator(project_root / "requirements.json")
         result = evaluator.evaluate(rows, features)
         print(json.dumps(result, indent=2, ensure_ascii=False))
-'''
-path = Path('/mnt/data/requirement_evaluator.py')
-path.write_text(code, encoding='utf-8')
-print(path)
-print(path.read_text(encoding='utf-8')[:500])
