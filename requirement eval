@@ -1,0 +1,81 @@
+from typing import Any, Dict, List
+
+
+class RequirementEvaluator:
+    def evaluate(self, rows: List[Dict[str, Any]], features: Dict[str, Any]) -> List[Dict[str, Any]]:
+        event_flags = features.get("event_flags", {})
+
+        results = []
+
+        # ---------------------------------------------------
+        # 1. Request-Response Check
+        # ---------------------------------------------------
+        if event_flags.get("request_seen"):
+            if event_flags.get("response_seen"):
+                status = "PASS"
+            else:
+                status = "FAIL"
+        else:
+            status = "NOT_APPLICABLE"
+
+        results.append({
+            "feature_name": "request_response_sequence",
+            "status": status,
+            "details": {
+                "request_seen": event_flags.get("request_seen"),
+                "response_seen": event_flags.get("response_seen")
+            },
+            "evidence_count": len(features.get("evidence_refs", []))
+        })
+
+        # ---------------------------------------------------
+        # 2. Data Flow Check
+        # ---------------------------------------------------
+        if event_flags.get("data_received"):
+            if event_flags.get("data_sent") or event_flags.get("data_forwarded"):
+                status = "PASS"
+            else:
+                status = "FAIL"
+        else:
+            status = "NOT_APPLICABLE"
+
+        results.append({
+            "feature_name": "data_flow_continuity",
+            "status": status,
+            "details": {
+                "data_received": event_flags.get("data_received"),
+                "data_sent": event_flags.get("data_sent"),
+                "data_forwarded": event_flags.get("data_forwarded")
+            },
+            "evidence_count": len(features.get("evidence_refs", []))
+        })
+
+        # ---------------------------------------------------
+        # 3. Readiness Check
+        # ---------------------------------------------------
+        operation_attempted = any([
+            event_flags.get("request_seen"),
+            event_flags.get("data_sent"),
+            event_flags.get("data_forwarded"),
+            event_flags.get("connected_seen"),
+        ])
+
+        if operation_attempted:
+            if event_flags.get("ready_seen"):
+                status = "PASS"
+            else:
+                status = "FAIL"
+        else:
+            status = "NOT_APPLICABLE"
+
+        results.append({
+            "feature_name": "readiness_before_operation",
+            "status": status,
+            "details": {
+                "operation_attempted": operation_attempted,
+                "ready_seen": event_flags.get("ready_seen")
+            },
+            "evidence_count": len(features.get("evidence_refs", []))
+        })
+
+        return results
