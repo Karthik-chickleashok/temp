@@ -7,13 +7,15 @@ from tkinter import filedialog, messagebox
 
 from parser.dlt_parser import DLTController
 from parser.normalizer import DLTNormalizer
+from feature_extractor.feature_extractor import FeatureExtractor
+from requirement_evaluator import RequirementEvaluator
 
 
 class CCU2AnalyzerUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("CCU2 Diagnosis Tool")
-        self.root.geometry("1200x760")
+        self.root.geometry("1250x780")
 
         self.controller = DLTController()
 
@@ -21,8 +23,10 @@ class CCU2AnalyzerUI:
         self.selected_files: list[str] = []
         self.selected_folder: str | None = None
 
-        self.raw_messages = []
-        self.normalized_rows = []
+        self.raw_messages: list[tuple[str, list]] = []
+        self.normalized_rows: list[dict] = []
+        self.feature_output: dict | None = None
+        self.requirement_output: list[dict] | None = None
 
         self._build_ui()
 
@@ -49,7 +53,13 @@ class CCU2AnalyzerUI:
         controls = tk.Frame(self.root)
         controls.pack(fill=tk.X, padx=10, pady=5)
 
-        self.btn_parse = tk.Button(controls, text="Parse + Normalize", width=18, state=tk.DISABLED, command=self.parse_selection)
+        self.btn_parse = tk.Button(
+            controls,
+            text="Parse + Normalize",
+            width=18,
+            state=tk.DISABLED,
+            command=self.parse_selection,
+        )
         self.btn_parse.pack(side=tk.LEFT, padx=5)
 
         self.btn_save_normalized = tk.Button(
@@ -61,7 +71,48 @@ class CCU2AnalyzerUI:
         )
         self.btn_save_normalized.pack(side=tk.LEFT, padx=5)
 
-        self.btn_clear = tk.Button(controls, text="Clear", width=12, command=self.clear_output)
+        self.btn_extract_features = tk.Button(
+            controls,
+            text="Extract Features",
+            width=16,
+            state=tk.DISABLED,
+            command=self.extract_features,
+        )
+        self.btn_extract_features.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save_features = tk.Button(
+            controls,
+            text="Save Features JSON",
+            width=16,
+            state=tk.DISABLED,
+            command=self.save_features_json,
+        )
+        self.btn_save_features.pack(side=tk.LEFT, padx=5)
+
+        self.btn_evaluate_requirements = tk.Button(
+            controls,
+            text="Evaluate Requirements",
+            width=18,
+            state=tk.DISABLED,
+            command=self.evaluate_requirements,
+        )
+        self.btn_evaluate_requirements.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save_requirements = tk.Button(
+            controls,
+            text="Save Requirement JSON",
+            width=18,
+            state=tk.DISABLED,
+            command=self.save_requirement_json,
+        )
+        self.btn_save_requirements.pack(side=tk.LEFT, padx=5)
+
+        self.btn_clear = tk.Button(
+            controls,
+            text="Clear",
+            width=10,
+            command=self.clear_output,
+        )
         self.btn_clear.pack(side=tk.LEFT, padx=5)
 
         self.output_text = tk.Text(self.root, wrap=tk.WORD)
@@ -163,6 +214,8 @@ class CCU2AnalyzerUI:
 
             self.raw_messages = grouped_messages
             self.normalized_rows = DLTNormalizer.normalize_grouped_messages(grouped_messages)
+            self.feature_output = None
+            self.requirement_output = None
 
             total_files = len(grouped_messages)
             total_rows = len(self.normalized_rows)
@@ -185,13 +238,69 @@ class CCU2AnalyzerUI:
             )
 
             self._set_output_text(output)
+
             self.btn_save_normalized.config(state=tk.NORMAL)
+            self.btn_extract_features.config(state=tk.NORMAL)
+            self.btn_save_features.config(state=tk.DISABLED)
+            self.btn_evaluate_requirements.config(state=tk.DISABLED)
+            self.btn_save_requirements.config(state=tk.DISABLED)
 
         except Exception as e:
             messagebox.showerror("Parse Error", str(e))
 
     # ------------------------------------------------------------------
-    # Save
+    # Feature extraction
+    # ------------------------------------------------------------------
+
+    def extract_features(self) -> None:
+        if not self.normalized_rows:
+            messagebox.showwarning("No normalized data", "Please parse and normalize input first.")
+            return
+
+        try:
+            extractor = FeatureExtractor()
+            self.feature_output = extractor.extract(self.normalized_rows)
+            self.requirement_output = None
+
+            self._set_output_text(json.dumps(self.feature_output, indent=2, ensure_ascii=False))
+
+            self.btn_save_features.config(state=tk.NORMAL)
+            self.btn_evaluate_requirements.config(state=tk.NORMAL)
+            self.btn_save_requirements.config(state=tk.DISABLED)
+
+        except Exception as e:
+            messagebox.showerror("Feature Extraction Error", str(e))
+
+    # ------------------------------------------------------------------
+    # Requirement evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate_requirements(self) -> None:
+        if not self.normalized_rows:
+            messagebox.showwarning("No normalized data", "Please parse and normalize input first.")
+            return
+
+        if not self.feature_output:
+            messagebox.showwarning("No features", "Please extract features first.")
+            return
+
+        try:
+            evaluator = RequirementEvaluator()
+            self.requirement_output = evaluator.evaluate(self.normalized_rows, self.feature_output)
+
+            display_data = {
+                "requirement_features": self.requirement_output,
+                "feature_count": len(self.requirement_output),
+            }
+
+            self._set_output_text(json.dumps(display_data, indent=2, ensure_ascii=False))
+            self.btn_save_requirements.config(state=tk.NORMAL)
+
+        except Exception as e:
+            messagebox.showerror("Requirement Evaluation Error", str(e))
+
+    # ------------------------------------------------------------------
+    # Save actions
     # ------------------------------------------------------------------
 
     def save_normalized_json(self) -> None:
@@ -216,6 +325,54 @@ class CCU2AnalyzerUI:
         except Exception as e:
             messagebox.showerror("Save Error", str(e))
 
+    def save_features_json(self) -> None:
+        if not self.feature_output:
+            messagebox.showwarning("No features", "Please extract features first.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save features JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.feature_output, f, indent=2, ensure_ascii=False)
+
+            messagebox.showinfo("Saved", f"Features JSON saved successfully:\n{path}")
+
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
+    def save_requirement_json(self) -> None:
+        if self.requirement_output is None:
+            messagebox.showwarning("No requirement results", "Please evaluate requirements first.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save requirement evaluation JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            data = {
+                "requirement_features": self.requirement_output,
+                "feature_count": len(self.requirement_output),
+            }
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            messagebox.showinfo("Saved", f"Requirement JSON saved successfully:\n{path}")
+
+        except Exception as e:
+            messagebox.showerror("Save Error", str(e))
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -226,17 +383,32 @@ class CCU2AnalyzerUI:
         self.selected_folder = None
         self.raw_messages = []
         self.normalized_rows = []
+        self.feature_output = None
+        self.requirement_output = None
 
         self.selection_label.config(text="No input selected")
+
         self.btn_parse.config(state=tk.DISABLED)
         self.btn_save_normalized.config(state=tk.DISABLED)
+        self.btn_extract_features.config(state=tk.DISABLED)
+        self.btn_save_features.config(state=tk.DISABLED)
+        self.btn_evaluate_requirements.config(state=tk.DISABLED)
+        self.btn_save_requirements.config(state=tk.DISABLED)
+
         self._set_output_text("")
 
     def _reset_after_selection(self) -> None:
         self.raw_messages = []
         self.normalized_rows = []
+        self.feature_output = None
+        self.requirement_output = None
+
         self.btn_parse.config(state=tk.NORMAL)
         self.btn_save_normalized.config(state=tk.DISABLED)
+        self.btn_extract_features.config(state=tk.DISABLED)
+        self.btn_save_features.config(state=tk.DISABLED)
+        self.btn_evaluate_requirements.config(state=tk.DISABLED)
+        self.btn_save_requirements.config(state=tk.DISABLED)
 
     def _set_output_text(self, text: str) -> None:
         self.output_text.delete("1.0", tk.END)
