@@ -600,3 +600,52 @@ class CCU2AnalyzerUI:
     # ------------------------------------------------------------------
     # Helpers
     # ---------------------------------------------------------
+# ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def clear_output(self) -> None:
+        self.input_mode = None
+        self.selected_files = []
+        self.selected_folder = None
+        self.raw_messages = []
+        self.normalized_rows = []
+        self.feature_output = None
+        self.requirement_output = None
+        self.query_var.set("")
+
+        self.selection_label.config(text="No input selected")
+
+        self.btn_parse.config(state=tk.DISABLED)
+        self.btn_save_normalized.config(state=tk.DISABLED)
+        self.btn_extract_features.config(state=tk.DISABLED)
+        self.btn_save_features.config(state=tk.DISABLED)
+        self.btn_evaluate_requirements.config(state=tk.DISABLED)
+        self.btn_save_requirements.config(state=tk.DISABLED)
+        self.btn_search.config(state=tk.DISABLED)
+
+        self._set_output_text("")
+
+    def _reset_after_selection(self) -> None:
+        self.raw_messages = []
+        self.normalized_rows = []
+        self.feature_output = None
+        self.requirement_output = None
+
+        self.btn_parse.config(state=tk.NORMAL)
+        self.btn_save_normalized.config(state=tk.DISABLED)
+        self.btn_extract_features.config(state=tk.DISABLED)
+        self.btn_save_features.config(state=tk.DISABLED)
+        self.btn_evaluate_requirements.config(state=tk.DISABLED)
+        self.btn_save_requirements.config(state=tk.DISABLED)
+        self.btn_search.config(state=tk.DISABLED)
+
+    def _set_output_text(self, text: str) -> None:
+        self.output_text.delete("1.0", tk.END)
+        self.output_text.insert(tk.END, text)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CCU2AnalyzerUI(root)
+    root.mainloop()
