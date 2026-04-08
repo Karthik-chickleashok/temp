@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from openpyxl import load_workbook
+from openpyxl.cell.cell import Cell
+from deep_translator import GoogleTranslator
+
+
+def is_korean_text(text: str) -> bool:
+    """Return True if the string contains Korean characters."""
+    for ch in text:
+        code = ord(ch)
+        if (
+            0xAC00 <= code <= 0xD7A3   # Hangul syllables
+            or 0x1100 <= code <= 0x11FF  # Hangul Jamo
+            or 0x3130 <= code <= 0x318F  # Hangul Compatibility Jamo
+        ):
+            return True
+    return False
+
+
+def should_translate(cell: Cell) -> bool:
+    """
+    Translate only plain string cells.
+    Skip formulas, numbers, dates, empty cells, and non-Korean text.
+    """
+    if cell.value is None:
+        return False
+
+    if cell.data_type == "f":  # formula
+        return False
+
+    if not isinstance(cell.value, str):
+        return False
+
+    text = cell.value.strip()
+    if not text:
+        return False
+
+    return is_korean_text(text)
+
+
+def safe_translate(translator: GoogleTranslator, text: str, retries: int = 3) -> str:
+    """Translate with simple retry logic."""
+    for attempt in range(retries):
+        try:
+            translated = translator.translate(text)
+            return translated if translated else text
+        except Exception as e:
+            if attempt == retries - 1:
+                print(f"Failed to translate: {text[:50]!r} -> {e}")
+                return text
+            time.sleep(1.5)
+
+
+def translate_workbook(
+    input_file: str,
+    output_file: str,
+    source_lang: str = "ko",
+    target_lang: str = "en",
+    translate_comments: bool = False,
+) -> None:
+    """
+    Load workbook, translate text cells, and save with formatting preserved.
+    """
+    input_path = Path(input_file)
+    output_path = Path(output_file)
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
+    print(f"Opening workbook: {input_path}")
+    wb = load_workbook(input_path)
+
+    translator = GoogleTranslator(source=source_lang, target=target_lang)
+
+    total_checked = 0
+    total_translated = 0
+
+    for ws in wb.worksheets:
+        print(f"\nProcessing sheet: {ws.title}")
+
+        for row in ws.iter_rows():
+            for cell in row:
+                total_checked += 1
+
+                if should_translate(cell):
+                    original = cell.value
+                    translated = safe_translate(translator, original)
+
+                    if translated != original:
+                        cell.value = translated
+                        total_translated += 1
+                        print(f"Translated [{ws.title} - {cell.coordinate}]")
+
+                if translate_comments and cell.comment and cell.comment.text:
+                    comment_text = cell.comment.text.strip()
+                    if is_korean_text(comment_text):
+                        translated_comment = safe_translate(translator, comment_text)
+                        cell.comment.text = translated_comment
+
+    wb.save(output_path)
+    print("\nDone.")
+    print(f"Cells checked: {total_checked}")
+    print(f"Cells translated: {total_translated}")
+    print(f"Saved translated workbook to: {output_path}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage:")
+        print("  python translate_excel.py input.xlsx output.xlsx")
+        sys.exit(1)
+
+    input_xlsx = sys.argv[1]
+    output_xlsx = sys.argv[2]
+
+    translate_workbook(
+        input_file=input_xlsx,
+        output_file=output_xlsx,
+        source_lang="ko",
+        target_lang="en",
+        translate_comments=False,  # set True if you also want comment translation
+    )
